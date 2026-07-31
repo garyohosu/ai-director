@@ -20,5 +20,5 @@
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: `142469af6b79f5b7d607d9625f7508dc3ccdffd0` (Invocation-ID・Knowledge Index provenance更新)
+- Commit: `852cb598ec02cb4bdeed2f62536d8b5a53280d99` (REAL03起動経路診断・Q009記録)
 - 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Knowledge Index、Context Packet、Outbox復旧を反映済み
