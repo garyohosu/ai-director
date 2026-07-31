@@ -105,7 +105,7 @@
 
 ## Q007
 
-- Status: OPEN
+- Status: ANSWERED
 - Request-ID: JOB-20260731T141500Z-REAL02
 - Decision-ID: DEC-20260731T141500Z-01-BEEF
 - From: claude_designer
@@ -116,3 +116,8 @@
 - Question: 成果物は指定文字列の一行を末尾改行なしで作成してよいですか？
 - Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
 - Evidence: 新規DBの実AI試験依頼
+- Answered-By: director
+- Decision: 成果物は、指定された文字列の一行を末尾改行なしで作成する。
+- Reason: 同一内容のQ006に対する確定済み回答を再利用した。
+- Reused-From: Q006
+- Answered-At: 2026-07-31T05:39:39Z

@@ -10,4 +10,6 @@
 - 再試行: なし
 - 成果物: 未作成
 - Context Packet: 未生成
-- 判定: 実AI試験失敗。Q007はOPENのまま保持する。
+- 追加記録: directorはQ006との限定的な正規化一致を検出し、Q007をANSWEREDへ更新した。しかし再利用後の`WORKER_WAITING_QUESTION → ANSWER_PENDING`遷移が未定義で、HUMAN_REQUIREDへ誤遷移した。
+- 追加メール: 7（director HUMAN_REQUIRED）、8（orchestrator NO_REPLY）
+- 判定: 実AI試験失敗。Claude/Codexは起動していない。成果物とContext Packetは未生成。
