@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 sys.path.extend([str(Path(__file__).parents[2]), str(Path(__file__).parents[2] / "mail")])
 
-from director.agent_reply import validate_and_read_result_file, mask_secrets
+from director.agent_reply import validate_and_read_result_file, validate_wait_payload, mask_secrets
 
 
 class TestAgentReply(unittest.TestCase):
@@ -43,6 +43,24 @@ class TestAgentReply(unittest.TestCase):
 
         parsed = validate_and_read_result_file(self.root, "result.json")
         self.assertEqual(parsed["summary"], "Done")
+
+    def test_wait_payload_requires_matching_ids_and_project_relative_files(self):
+        checkpoint = self.root / "director" / "checkpoints" / "worker-checkpoint.json"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_text("{}", encoding="utf-8")
+        (self.root / "QandA.md").write_text("# QandA.md\n", encoding="utf-8")
+        payload = {
+            "status": "WAITING_FOR_DECISION",
+            "job_id": "JOB-WAIT-001",
+            "decision_id": "DEC-WAIT-001",
+            "qanda_ids": ["Q006"],
+            "summary": "Blocking質問への回答待ち",
+            "checkpoint": "director/checkpoints/worker-checkpoint.json",
+        }
+        self.assertEqual(validate_wait_payload(self.root, payload, "JOB-WAIT-001", "DEC-WAIT-001")["qanda_ids"], ["Q006"])
+        payload["checkpoint"] = "../outside.json"
+        with self.assertRaises(ValueError):
+            validate_wait_payload(self.root, payload, "JOB-WAIT-001", "DEC-WAIT-001")
 
     def test_validate_result_file_absolute_path_rejected(self):
         with self.assertRaises(ValueError) as ctx:
@@ -116,22 +134,35 @@ class TestAgentReply(unittest.TestCase):
         mails = find_mails(sender_uid=u1, recipient_uid=u2, request_id="JOB-DEDUP-001", db_path=db_path)
         self.assertEqual(len(mails), 1)
 
-        # 2. Second ACK (Duplicate) -> Mail skipped (still 1 mail)
+        checkpoint = self.root / "director" / "checkpoints" / "worker-checkpoint.json"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text("{}", encoding="utf-8")
+        (self.root / "QandA.md").write_text("# QandA.md\n", encoding="utf-8")
+        wait_file = self.root / "wait.json"
+        wait_file.write_text(json.dumps({
+            "status": "WAITING_FOR_DECISION", "job_id": "JOB-DEDUP-001", "decision_id": "DEC-DEDUP-001",
+            "qanda_ids": ["Q006"], "summary": "Blocking question", "checkpoint": "director/checkpoints/worker-checkpoint.json",
+        }), encoding="utf-8")
+        subprocess.check_call([sys.executable, str(agent_reply_py), "wait", "--result-file", "wait.json"], env=env)
+        mails = find_mails(sender_uid=u1, recipient_uid=u2, request_id="JOB-DEDUP-001", db_path=db_path)
+        self.assertEqual(len(mails), 2)
+
+        # 2. ACK from a newly resumed CLI is allowed after WAITING (total 3 mails)
         subprocess.check_call([sys.executable, str(agent_reply_py), "ack"], env=env)
         mails = find_mails(sender_uid=u1, recipient_uid=u2, request_id="JOB-DEDUP-001", db_path=db_path)
-        self.assertEqual(len(mails), 1)
+        self.assertEqual(len(mails), 3)
 
-        # 3. First COMPLETED -> Mail sent (total 2 mails)
+        # 3. First COMPLETED -> Mail sent (total 4 mails)
         res_file = self.root / "res.json"
         res_file.write_text(json.dumps({"status": "COMPLETED", "summary": "done"}), encoding="utf-8")
         subprocess.check_call([sys.executable, str(agent_reply_py), "complete", "--result-file", "res.json"], env=env)
         mails = find_mails(sender_uid=u1, recipient_uid=u2, request_id="JOB-DEDUP-001", db_path=db_path)
-        self.assertEqual(len(mails), 2)
+        self.assertEqual(len(mails), 4)
 
-        # 4. Second COMPLETED (Duplicate) -> Mail skipped (still 2 mails)
+        # 4. Second COMPLETED (Duplicate) -> Mail skipped (still 4 mails)
         subprocess.check_call([sys.executable, str(agent_reply_py), "complete", "--result-file", "res.json"], env=env)
         mails = find_mails(sender_uid=u1, recipient_uid=u2, request_id="JOB-DEDUP-001", db_path=db_path)
-        self.assertEqual(len(mails), 2)
+        self.assertEqual(len(mails), 4)
 
         # 5. ACK after COMPLETED -> Rejected with exit code 1
         res_code = subprocess.call([sys.executable, str(agent_reply_py), "ack"], env=env)
@@ -142,7 +173,7 @@ class TestAgentReply(unittest.TestCase):
         env_dec2["DECISION_ID"] = "DEC-DEDUP-002"
         subprocess.check_call([sys.executable, str(agent_reply_py), "ack"], env=env_dec2)
         mails_dec2 = find_mails(sender_uid=u1, recipient_uid=u2, request_id="JOB-DEDUP-001", db_path=db_path)
-        self.assertEqual(len(mails_dec2), 3)
+        self.assertEqual(len(mails_dec2), 5)
 
 
 if __name__ == "__main__":

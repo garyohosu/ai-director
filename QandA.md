@@ -84,3 +84,21 @@
 - Decision: 承認する。orchestratorへdirector用CLIアダプターおよび設定を追加してよい。既存のmail/orchestrator公開仕様を壊さず、directorは可変UIDで通常登録する。起動・タイムアウト管理はorchestrator、判断・委任はdirectorが担う。
 - Reason: 人間からの指示に基づき、 orchestratorでの統合運用を正式許可するため。
 - Answered-At: 2026-07-31T12:28:55Z
+
+## Q006
+
+- Status: ANSWERED
+- Request-ID: JOB-20260731T132500Z-REAL01
+- Decision-ID: DEC-20260731T132500Z-01-C0DE
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物ファイルは末尾改行なしの一行で作成してよいですか？
+- Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
+- Evidence: この試験依頼
+- Answered-By: human_controller
+- Decision: 成果物ファイルは、指定された文字列の一行を末尾改行なしで作成する。
+- Reason: 実AI試験では成果物のバイト列とSHA-256を完全一致で検証するため。
+- Answered-At: 2026-07-31T04:57:29Z

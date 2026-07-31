@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 import sys
-sys.path.extend([str(Path(__file__).parents[2]), str(Path(__file__).parents[2] / "mail"), str(Path(__file__).parents[2] / "orchestrator")])
+_paths = [Path(__file__).parents[2] / "orchestrator", Path(__file__).parents[2] / "mail", Path(__file__).parents[2]]
+sys.path[:0] = [str(_path) for _path in _paths if str(_path) not in sys.path]
 
 from mail import initialize, send_mail, find_mails
 from config import AgentDefinition

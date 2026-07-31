@@ -12,7 +12,13 @@
 ## orchestrator
 
 - Repository: https://github.com/garyohosu/ai-orchestrator
-- Commit: `9714828` ("feat: add env_vars propagation, decision_id support, and NOJOB warning logging")
+- Commit: `d2986fe106ef72f19e5d8d540f19148ab7caf7fc` ("feat: support director waiting and timeout handoff")
 - Local path: `C:\PROJECT\ai-orchestrator`
-- 状態: `agent_reply` サポート環境変数注入、Decision-ID保持および NOJOB 警告ログ出力を本リポジトリおよび `ai-orchestrator` 側へ反映済み
-- テスト結果: 123/123件成功
+- 状態: `agent_reply` サポート環境変数注入、Decision-ID保持、directorアダプター、WAITING_FOR_DECISIONおよび構造化タイムアウト通知を反映済み
+- テスト結果: 125/125件成功
+
+## director
+
+- Repository: https://github.com/garyohosu/ai-director
+- Commit: `bc332307dd60ae0a8175e8c475ff971ce12e21a4` ("feat: add director waiting decision loop")
+- 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Context Packet、Outbox復旧を反映済み

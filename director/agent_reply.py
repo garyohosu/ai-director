@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ _SECRET_MARKERS = (
     "cookie",
     "authorization",
 )
+_QANDA_ID_RE = re.compile(r"^Q[0-9]{3,}$")
 
 
 def _load_mail_module(project_root: Path):
@@ -102,6 +104,41 @@ def validate_and_read_result_file(project_root: Path, file_path_str: str) -> dic
     return data
 
 
+def validate_wait_payload(project_root: Path, payload: dict, job_id: str, decision_id: str | None) -> dict:
+    if payload.get("status") != "WAITING_FOR_DECISION":
+        raise ValueError("wait result status must be WAITING_FOR_DECISION")
+    if payload.get("job_id") != job_id:
+        raise ValueError("wait result Job-ID does not match JOB_ID")
+    if decision_id and payload.get("decision_id") != decision_id:
+        raise ValueError("wait result Decision-ID does not match DECISION_ID")
+    qanda_ids = payload.get("qanda_ids")
+    if not isinstance(qanda_ids, list) or not qanda_ids or not all(isinstance(item, str) and _QANDA_ID_RE.fullmatch(item) for item in qanda_ids):
+        raise ValueError("qanda_ids must contain one or more valid Q&A IDs")
+    if not isinstance(payload.get("summary"), str) or not payload["summary"].strip():
+        raise ValueError("summary is required")
+    checkpoint = payload.get("checkpoint")
+    if not isinstance(checkpoint, str) or not checkpoint:
+        raise ValueError("checkpoint is required")
+    _validate_project_relative_file(project_root, checkpoint, must_exist=True)
+    qanda_path = payload.get("qanda_path", "QandA.md")
+    _validate_project_relative_file(project_root, qanda_path, must_exist=True)
+    return payload
+
+
+def _validate_project_relative_file(project_root: Path, value: str, *, must_exist: bool) -> Path:
+    raw = Path(value)
+    if raw.is_absolute():
+        raise ValueError(f"Absolute path not allowed: {value}")
+    resolved = (project_root / raw).resolve()
+    try:
+        resolved.relative_to(project_root.resolve())
+    except ValueError as err:
+        raise ValueError(f"Path outside project_path rejected: {value}") from err
+    if must_exist and not resolved.is_file():
+        raise ValueError(f"File does not exist: {value}")
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Secure status reporter for AI agents"
@@ -115,6 +152,13 @@ def main() -> int:
         "--result-file",
         required=True,
         help="Path to result JSON file relative to project root",
+    )
+
+    wait_p = subparsers.add_parser("wait", help="Report WAITING_FOR_DECISION status")
+    wait_p.add_argument(
+        "--result-file",
+        required=True,
+        help="Path to waiting result JSON file relative to project root",
     )
 
     fail_p = subparsers.add_parser("fail", help="Report FAILED status")
@@ -167,7 +211,12 @@ def main() -> int:
         except Exception:
             current_state = None
 
-    target_status = "ACK_RECEIVED" if args.action == "ack" else ("COMPLETED" if args.action == "complete" else "FAILED")
+    target_status = {
+        "ack": "ACK_RECEIVED",
+        "wait": "WAITING_FOR_DECISION",
+        "complete": "COMPLETED",
+        "fail": "FAILED",
+    }[args.action]
 
     # State Transition Rules:
     # 1. Same status twice -> Duplicate, skip sending mail.
@@ -194,6 +243,20 @@ def main() -> int:
         mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
         state_file.write_text(json.dumps({"status": "ACK_RECEIVED", "updated_at": subject}), encoding="utf-8")
         print(f"ACK sent to {reply_to_uid}")
+        return 0
+
+    if args.action == "wait":
+        try:
+            payload = validate_wait_payload(project_root, validate_and_read_result_file(project_root, args.result_file), job_id, decision_id)
+        except Exception as err:
+            print(f"ERROR validating wait result file: {err}", file=sys.stderr)
+            return 1
+        payload["agent_uid"] = agent_uid
+        payload["decision_id"] = decision_id
+        body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
+        mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
+        state_file.write_text(json.dumps({"status": "WAITING_FOR_DECISION", "updated_at": subject}), encoding="utf-8")
+        print(f"Report WAITING_FOR_DECISION sent to {reply_to_uid}")
         return 0
 
     try:

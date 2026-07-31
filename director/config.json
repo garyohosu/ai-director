@@ -1,0 +1,10 @@
+{
+  "director_name": "director",
+  "worker_name": "claude_designer",
+  "commander_name": "codex_reviewer",
+  "human_name": "human_controller",
+  "decision_wait_timeout_sec": 300,
+  "max_mails_per_once": 5,
+  "max_decisions_per_request": 15,
+  "context_max_bytes": 32768
+}

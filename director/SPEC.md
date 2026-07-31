@@ -86,6 +86,12 @@ OUTBOX_PENDING    … 判断結果に基づく指示メールの送信を試み�
 SENT              … 送信を試みたメールが実際にmail DBへ記録されたことを確認した
 COMPLETED         … この依頼IDに対する一連の処理が完了した
 HUMAN_REQUIRED    … 自動処理を停止し、人間の判断を待っている
+
+WAITING_FOR_DECISION … 作業AIがBlocking質問を送信し、質問結果JSONとcheckpointを報告して終了した状態。Job全体は非終端だが、そのCLI起動単位は正常終了とする。同一CLIプロセス内で回答を待たない。
+
+作業AIの質問手順は「QandA.mdへOPEN質問を追加 → 質問メール送信 → `agent_reply.py wait --result-file`でWAITING_FOR_DECISION送信 → checkpoint保存確認 → 終了コード0」とする。directorは質問とWAITING通知を受信した後、`DECISION_PENDING`へ進む。
+
+orchestratorのCLIタイムアウト通知は`status: TIMED_OUT`、`job_id`、`decision_id`、`agent_uid`、`exit_code`、`timeout_sec`、`stdout_log`、`stderr_log`、`occurred_at`を含む構造化フィールドを持つ。質問メールとタイムアウト通知が併存する場合、質問成功へ補正せず、当該CLI実行をタイムアウトとして記録し、directorは原則`HUMAN_REQUIRED`へ遷移する。
 ```
 
 ### 状態遷移
