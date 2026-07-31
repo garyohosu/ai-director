@@ -139,3 +139,17 @@
 - Decision: directorも他のエージェントと同様に、Invocation-ID付きのメールで起動単位の終了状態を通知する。stdoutおよび終了コード0だけではInvocation成功と判定しない。directorがworkerへ委任して自身の処理を終了する場合は、WAITING_FOR_WORKERを送信する。
 - Reason: 全エージェントでInvocation終了契約を統一し、NO_REPLY判定、再起動、状態復旧、将来のチャネル差し替えを一貫して扱うため。
 - Answered-At: 2026-07-31T07:00:00Z
+
+## Q010
+
+- Status: OPEN
+- Request-ID: JOB-20260731T072152Z-REAL04
+- Decision-ID: DEC-20260731T072152Z-01-9A21
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物の文字コードはUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにしますか?
+- Proposed-Answer: UTF-8(BOMなし)を推奨する。
+- Evidence: JOB-20260731T072152Z-REAL04のDELEGATEメール(依頼書は成果物の文字コードを指定していない)

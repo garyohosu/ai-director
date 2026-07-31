@@ -1,12 +1,12 @@
 ---
-source_commit: "80448fafddfe0eb136d13c1157a466e1690f51ed"
-generated_at: "2026-07-31T07:04:56Z"
+source_commit: "1fa84bb518bd20d99c24ae3a328cce8cedea7e08"
+generated_at: "2026-07-31T07:31:34Z"
 source_files:
   - director/SPEC.md
   - QandA.md
 source_sha256:
   director/SPEC.md: bf35d3071169ece1868f34ee69c171105e2175c913a5ae48795534ff4f391d82
-  QandA.md: a47a6b1d345f01b6393a37ada49a6b70b5bcae199ba6ec7b7982b7d84eea20a9
+  QandA.md: 99adb3d32680f23a4f8c80835795c9f3654977c0fba2d79350ad35ba54198b4c
 ---
 # Operations
 
