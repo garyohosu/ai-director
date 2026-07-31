@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+_SECRET_MARKERS = (
+    "api_key",
+    "apikey",
+    "api-key",
+    "token",
+    "password",
+    "secret",
+    "cookie",
+    "authorization",
+)
+
+
+def _load_mail_module(project_root: Path):
+    if "mail" in sys.modules and hasattr(sys.modules["mail"], "send_mail"):
+        return sys.modules["mail"]
+    mail_dir = project_root / "mail"
+    if not mail_dir.is_dir():
+        raise RuntimeError(f"mail directory not found at {mail_dir}")
+    init_path = mail_dir / "__init__.py"
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mail", init_path, submodule_search_locations=[str(mail_dir)]
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Failed to build spec for mail module")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["mail"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def mask_secrets(data: str) -> str:
+    lines_out = []
+    for line in data.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in _SECRET_MARKERS) and ("=" in line or ":" in line):
+            lines_out.append("[REDACTED_SECRET_LINE]")
+        else:
+            lines_out.append(line)
+    return "\n".join(lines_out)
+
+
+def validate_and_read_result_file(project_root: Path, file_path_str: str) -> dict:
+    raw_path = Path(file_path_str)
+    if raw_path.is_absolute():
+        raise ValueError(f"Absolute path not allowed: {file_path_str}")
+
+    resolved = (project_root / raw_path).resolve()
+    root_resolved = project_root.resolve()
+
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError as err:
+        raise ValueError(
+            f"Path outside project_path rejected: {file_path_str}"
+        ) from err
+
+    if not resolved.is_file():
+        raise ValueError(
+            f"File does not exist or is not a regular file: {file_path_str}"
+        )
+
+    if resolved.stat().st_size > 10 * 1024 * 1024:
+        raise ValueError("File size exceeds 10MB limit")
+
+    content = resolved.read_bytes().decode("utf-8")
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("Result file JSON must be an object")
+
+    artifacts = data.get("artifacts", [])
+    if isinstance(artifacts, list):
+        for art in artifacts:
+            if isinstance(art, dict) and "path" in art:
+                art_path_str = art["path"]
+                art_raw = Path(art_path_str)
+                if art_raw.is_absolute():
+                    raise ValueError(f"Absolute artifact path not allowed: {art_path_str}")
+                art_path = (project_root / art_raw).resolve()
+                try:
+                    art_path.relative_to(root_resolved)
+                except ValueError as err:
+                    raise ValueError(f"Artifact path outside project_path rejected: {art_path_str}") from err
+                if not art_path.is_file():
+                    raise ValueError(f"Artifact file does not exist or is not regular: {art_path_str}")
+                actual_sha = hashlib.sha256(art_path.read_bytes()).hexdigest()
+                if "sha256" in art and art["sha256"] != actual_sha:
+                    raise ValueError(
+                        f"SHA-256 mismatch for artifact {art['path']}: expected {art['sha256']}, got {actual_sha}"
+                    )
+                art["sha256"] = actual_sha
+    return data
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Secure status reporter for AI agents"
+    )
+    subparsers = parser.add_subparsers(dest="action", required=True)
+
+    subparsers.add_parser("ack", help="Report ACK_RECEIVED")
+
+    complete_p = subparsers.add_parser("complete", help="Report COMPLETED status")
+    complete_p.add_argument(
+        "--result-file",
+        required=True,
+        help="Path to result JSON file relative to project root",
+    )
+
+    fail_p = subparsers.add_parser("fail", help="Report FAILED status")
+    fail_p.add_argument(
+        "--result-file",
+        required=True,
+        help="Path to error result JSON file relative to project root",
+    )
+
+    args = parser.parse_args()
+
+    mail_db_path = os.environ.get("AGENT_MAIL_DB_PATH")
+    agent_uid = os.environ.get("AGENT_UID")
+    reply_to_uid = os.environ.get("REPLY_TO_UID")
+    job_id = os.environ.get("JOB_ID")
+    decision_id = os.environ.get("DECISION_ID")
+    project_path_str = os.environ.get("PROJECT_PATH", ".")
+
+    if not all([agent_uid, reply_to_uid, job_id]):
+        print(
+            "ERROR: Missing required environment variables (AGENT_UID, REPLY_TO_UID, JOB_ID)",
+            file=sys.stderr,
+        )
+        return 1
+
+    project_root = Path(project_path_str).resolve()
+    mail = _load_mail_module(project_root)
+
+    kwargs = {}
+    if mail_db_path:
+        db_p = Path(mail_db_path)
+        if not db_p.is_absolute():
+            db_p = (project_root / db_p).resolve()
+        kwargs["db_path"] = db_p
+
+    act_str = args.action.upper()
+    dec_str = decision_id or "DEC-NONE"
+    subject = f"[{job_id}] [{dec_str}] STATUS: {act_str}"
+
+    # Persistent state tracking for deduplication & state transition rules
+    state_dir = project_root / "director" / ".state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / f"{job_id}_{dec_str}.json"
+
+    current_state = None
+    if state_file.is_file():
+        try:
+            state_data = json.loads(state_file.read_text(encoding="utf-8"))
+            current_state = state_data.get("status")
+        except Exception:
+            current_state = None
+
+    target_status = "ACK_RECEIVED" if args.action == "ack" else ("COMPLETED" if args.action == "complete" else "FAILED")
+
+    # State Transition Rules:
+    # 1. Same status twice -> Duplicate, skip sending mail.
+    if current_state == target_status:
+        print(f"INFO: Duplicate {target_status} requested for {job_id}/{dec_str}. Skipping mail delivery.", file=sys.stderr)
+        return 0
+
+    # 2. Transition from terminal state (COMPLETED or FAILED) to any state -> Rejected.
+    if current_state in ("COMPLETED", "FAILED"):
+        print(f"ERROR: Cannot transition from terminal state '{current_state}' to '{target_status}' for {job_id}/{dec_str}.", file=sys.stderr)
+        return 1
+
+    if args.action == "ack":
+        body_dict = {
+            "status": "ACK_RECEIVED",
+            "job_id": job_id,
+            "decision_id": decision_id,
+            "agent_uid": agent_uid,
+            "message": "Task instruction accepted and processing started.",
+        }
+        body_text = mask_secrets(
+            json.dumps(body_dict, ensure_ascii=False, indent=2)
+        )
+        mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
+        state_file.write_text(json.dumps({"status": "ACK_RECEIVED", "updated_at": subject}), encoding="utf-8")
+        print(f"ACK sent to {reply_to_uid}")
+        return 0
+
+    try:
+        payload = validate_and_read_result_file(project_root, args.result_file)
+    except Exception as err:
+        print(f"ERROR validating result file: {err}", file=sys.stderr)
+        err_dict = {
+            "status": "DELIVERY_FAILED",
+            "job_id": job_id,
+            "decision_id": decision_id,
+            "agent_uid": agent_uid,
+            "error": str(err),
+        }
+        body_text = mask_secrets(
+            json.dumps(err_dict, ensure_ascii=False, indent=2)
+        )
+        mail.send_mail(
+            agent_uid,
+            reply_to_uid,
+            f"[{job_id}] STATUS: DELIVERY_FAILED",
+            body_text,
+            **kwargs,
+        )
+        return 1
+
+    status_code = "COMPLETED" if args.action == "complete" else "FAILED"
+    payload["status"] = status_code
+    payload["job_id"] = job_id
+    payload["decision_id"] = decision_id
+    payload["agent_uid"] = agent_uid
+
+    body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
+    mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
+    state_file.write_text(json.dumps({"status": status_code, "updated_at": subject}), encoding="utf-8")
+    print(f"Report {status_code} sent to {reply_to_uid}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

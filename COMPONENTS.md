@@ -1,26 +1,18 @@
-﻿# COMPONENTS.md
+# COMPONENTS.md
 
-本リポジトリに同梱されている外部・先行コンポーネントのバージョン管理記録です。
+本リポジトリで参照・連携する外部・関連コンポーネントのバージョンおよびリポジトリ対応記録です。
 
 ## mail
 
 - Repository: https://github.com/garyohosu/aiagent-mail
-- Commit: 不明（要確認）
-- Imported: 2026-07-31
-- Local modifications: なし
-- 状態確認:
-  - 過去データ / DB: なし（data/ は空または初期状態）
-  - ログ・実行情報: なし
-  - テスト結果: 56/56件成功 (py -3 -m unittest discover -s mail/tests)
+- Commit: `f24af8b` ("fix: finalize safe find_mails query API")
+- Local path: `C:\PROJECT\aiagent-mail`
+- 状態: 今回コード変更なし（独立リポジトリ `aiagent-mail` にて保守）
 
 ## orchestrator
 
-- Repository: (ローカル先行開発版よりコピー)
-- Commit: 不明（要確認）
-- Imported: 2026-07-31
-- Local modifications: なし
-- 状態確認:
-  - 過去データ / DB: なし
-  - stop.request: なし
-  - logs / checkpoints / runtime: .gitkeep のみ
-  - テスト結果: 120/120件成功 (py -3 -m unittest discover -s orchestrator/tests -t orchestrator)
+- Repository: https://github.com/garyohosu/ai-orchestrator
+- Commit: `9714828` ("feat: add env_vars propagation, decision_id support, and NOJOB warning logging")
+- Local path: `C:\PROJECT\ai-orchestrator`
+- 状態: `agent_reply` サポート環境変数注入、Decision-ID保持および NOJOB 警告ログ出力を本リポジトリおよび `ai-orchestrator` 側へ反映済み
+- テスト結果: 123/123件成功
