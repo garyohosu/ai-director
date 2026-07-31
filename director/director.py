@@ -127,7 +127,7 @@ class DirectorEngine:
         if existing:
             return existing
         decision_id = _id(DEC_RE, message["subject"], "Decision-ID")
-        record = JobRecord(job_id, message["mail_id"], message["sender_uid"], self.uids["worker"], self.uids["commander"], decision_id, JobState.DISCOVERED)
+        record = JobRecord(job_id, message["mail_id"], message["sender_uid"], self.uids["worker"], self.uids["commander"], decision_id, JobState.DISCOVERED, request_summary=message.get("body", "")[:4000])
         self.jobs.save(record)
         return record
 
@@ -154,8 +154,8 @@ class DirectorEngine:
         path = self.root / "director" / "checkpoints" / record.job_id / f"{record.decision_id}-context.md"
         result = self.packet_builder.build(
             record.job_id, record.decision_id, role="codex_commander", task=question, state=record.state,
-            completed=[f"request mail {record.request_mail_id} received", "worker delegation sent"],
-            unresolved=[question], qanda=[question], spec_sections=["director/SPEC.md §10", "director/SPEC.md §11"],
+            completed=[f"request mail {record.request_mail_id} received", "worker delegation sent", f"Original request: {record.request_summary[:2000]}"],
+            unresolved=[question], qanda=self._packet_qanda(question), spec_sections=["director/SPEC.md §10", "director/SPEC.md §11"],
             target_files=record.artifact_paths, git_summary="git diff summary is intentionally omitted unless supplied by the worker",
             test_summary="latest worker test result is pending", prohibitions=["no director self-change", "no commit or push"],
             reply_commands=["send ACK", "send one valid decision JSON and terminal status"], completion="Return a valid decision JSON with matching Job-ID and Decision-ID.", path=path,
@@ -163,6 +163,16 @@ class DirectorEngine:
         record.latest_checkpoint = str(path.relative_to(self.root))
         self.jobs.save(record)
         return record.latest_checkpoint, result.byte_size, result.estimated_tokens
+
+    def _packet_qanda(self, current_question: str) -> list[str]:
+        items = [current_question]
+        try:
+            for question in parse_qanda(self.qanda_path):
+                if question.number == "Q006" and question.status == "ANSWERED":
+                    items.append(f"Q006 Question: {question.fields.get('Question', '')} / Decision: {question.fields.get('Decision', '')}")
+        except QandaError:
+            pass
+        return items
 
     def _request_decision(self, record: JobRecord, question: str) -> JobRecord:
         packet, size, tokens = self._build_packet(record, question)

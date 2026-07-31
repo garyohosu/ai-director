@@ -87,6 +87,7 @@ class JobRecord:
     latest_checkpoint: str = ""
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+    request_summary: str = ""
 
     def __post_init__(self) -> None:
         validate_job_id(self.job_id)
@@ -127,10 +128,13 @@ class JobStore:
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("request_summary", "")
         return JobRecord(**data)
 
     def list_records(self) -> list[JobRecord]:
         records = []
         for path in sorted(self.root.glob("JOB-*.json")):
-            records.append(JobRecord(**json.loads(path.read_text(encoding="utf-8"))))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data.setdefault("request_summary", "")
+            records.append(JobRecord(**data))
         return records
