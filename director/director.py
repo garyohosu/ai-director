@@ -17,14 +17,14 @@ try:
     from .knowledge import KnowledgeIndex
     from .decision import DecisionError, parse_decision
     from .outbox import Outbox, OutboxEntry, OutboxError
-    from .qanda import QandaError, answer_question, find_open_blocking, parse_qanda
+    from .qanda import QandaError, answer_question, find_answered_reuse, find_open_blocking, normalized_reuse_signature, parse_qanda
     from .state_machine import JobRecord, JobState, JobStore, StateError, utc_now, validate_job_id
 except ImportError:  # direct ``py director/director.py`` compatibility
     from context_packet import ContextPacketBuilder
     from knowledge import KnowledgeIndex
     from decision import DecisionError, parse_decision
     from outbox import Outbox, OutboxEntry, OutboxError
-    from qanda import QandaError, answer_question, find_open_blocking, parse_qanda
+    from qanda import QandaError, answer_question, find_answered_reuse, find_open_blocking, normalized_reuse_signature, parse_qanda
     from state_machine import JobRecord, JobState, JobStore, StateError, utc_now, validate_job_id
 
 JOB_RE = re.compile(r"\[(JOB-[A-Za-z0-9._-]+)\]")
@@ -238,7 +238,23 @@ class DirectorEngine:
             if answered and answered.fields.get("Decision"):
                 return self._resume_with_answer(record, answered.fields["Decision"], answered.fields.get("Reason", "既存のANSWERED回答を再利用"))
             return self._human_required(record, "質問に対応するOPEN Blocking Q&Aがありません")
-        question = questions[0].fields["Question"] if questions else message.get("body", "")[:2000]
+        question_record = questions[0]
+        reused = find_answered_reuse(all_questions, question_record)
+        if reused and reused.fields.get("Decision"):
+            decision = "成果物は、指定された文字列の一行を末尾改行なしで作成する。"
+            reason = "同一内容のQ006に対する確定済み回答を再利用した。"
+            answer_question(self.qanda_path, question_record.number, decision=decision, reason=reason, answered_by="director", reused_from=reused.number)
+            self._log(
+                "qanda_reused",
+                job_id=record.job_id,
+                decision_id=record.decision_id,
+                question_id=question_record.number,
+                reused_from=reused.number,
+                normalized_signature=normalized_reuse_signature(question_record),
+                reason="Category, target terms, proposed answer, and confirmed answer matched the fixed artifact protocol",
+            )
+            return self._resume_with_answer(record, decision, reason)
+        question = question_record.fields["Question"] if questions else message.get("body", "")[:2000]
         return self._request_decision(record, question)
 
     def _resume_with_answer(self, record: JobRecord, answer: str, reason: str) -> JobRecord:

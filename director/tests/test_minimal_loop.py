@@ -12,7 +12,7 @@ from context_packet import ContextPacketBuilder
 from decision import DecisionError, parse_decision
 from director.director import DirectorEngine
 from outbox import Outbox, OutboxEntry, OutboxError
-from qanda import QandaError, answer_question, find_open_blocking, parse_qanda
+from qanda import QandaError, answer_question, find_answered_reuse, find_open_blocking, normalized_reuse_signature, parse_qanda
 from state_machine import JobRecord, JobState, JobStore, StateError
 
 
@@ -92,6 +92,44 @@ class DirectorUnitTests(unittest.TestCase):
             self.assertTrue(result.truncated)
             self.assertLessEqual(result.byte_size, 200)
             self.assertIn("source_sha256=", result.path.read_text(encoding="utf-8"))
+
+    def test_qanda_reuse_normalizes_only_fixed_artifact_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "QandA.md"
+            path.write_text("""# QandA.md
+
+## Q006
+- Status: ANSWERED
+- Request-ID: JOB-OLD
+- From: claude_worker
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物ファイルは末尾改行なしの一行で作成してよいですか？
+- Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
+- Evidence: test
+- Answered-By: human_controller
+- Decision: 成果物ファイルは、指定された文字列の一行を末尾改行なしで作成する。
+- Reason: confirmed
+
+## Q007
+- Status: OPEN
+- Request-ID: JOB-NEW
+- From: claude_worker
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物は指定文字列の一行を末尾改行なしで作成してよいですか？
+- Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
+- Evidence: test
+""", encoding="utf-8")
+            questions = parse_qanda(path)
+            target = next(q for q in questions if q.number == "Q007")
+            source = find_answered_reuse(questions, target)
+            self.assertEqual(source.number, "Q006")
+            self.assertEqual(normalized_reuse_signature(source), normalized_reuse_signature(target))
 
     def test_decision_schema_rejects_mismatch_and_bad_action(self) -> None:
         valid = {"action": "ANSWER", "job_id": "JOB-TEST-001", "decision_id": "DEC-TEST-001", "confidence": "HIGH", "reason": "r", "answer": "a", "target_agent": "claude_worker", "requires_human": False}

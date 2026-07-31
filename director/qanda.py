@@ -89,7 +89,39 @@ def find_answered(question_list: list[Question], question: Question) -> Question
     return None
 
 
-def answer_question(path: Path, number: str, *, decision: str, reason: str, answered_by: str = "director") -> None:
+_REUSE_TERMS = ("成果物", "指定文字列", "一行", "末尾改行なし")
+
+
+def normalized_reuse_signature(question: Question) -> tuple[str, tuple[str, ...]]:
+    """Return a deliberately narrow signature for the one-line artifact rule.
+
+    This is not a general semantic matcher: it only normalizes whitespace,
+    punctuation, the known ``成果物ファイル`` spelling variant, and the four
+    terms required by this protocol.
+    """
+    text = " ".join(
+        question.fields.get(key, "")
+        for key in ("Question", "Proposed-Answer", "Decision")
+    )
+    text = re.sub(r"\s+", "", text).replace("成果物ファイル", "成果物")
+    terms = tuple(term for term in _REUSE_TERMS if term in text)
+    return question.fields.get("Category", ""), terms
+
+
+def find_answered_reuse(question_list: list[Question], question: Question) -> Question | None:
+    """Find an ANSWERED question only for the fixed artifact protocol shape."""
+    signature = normalized_reuse_signature(question)
+    if signature[0] != "SPEC" or set(signature[1]) != set(_REUSE_TERMS):
+        return None
+    for candidate in question_list:
+        if candidate.status != "ANSWERED":
+            continue
+        if normalized_reuse_signature(candidate) == signature:
+            return candidate
+    return None
+
+
+def answer_question(path: Path, number: str, *, decision: str, reason: str, answered_by: str = "director", reused_from: str | None = None) -> None:
     questions = parse_qanda(path)
     target = next((q for q in questions if q.number == number), None)
     if target is None:
@@ -101,6 +133,8 @@ def answer_question(path: Path, number: str, *, decision: str, reason: str, answ
     fields["Answered-By"] = answered_by
     fields["Decision"] = decision
     fields["Reason"] = reason
+    if reused_from:
+        fields["Reused-From"] = reused_from
     fields["Answered-At"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     rendered: list[str] = ["# QandA.md", ""]
     for question in questions:
