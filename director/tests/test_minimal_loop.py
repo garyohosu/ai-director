@@ -66,7 +66,8 @@ class DirectorUnitTests(unittest.TestCase):
             with self.assertRaises(StateError):
                 store.path_for("JOB-../escape")
             self.assertEqual(record.transition(JobState.ACK_SENT).state, JobState.ACK_SENT)
-            self.assertEqual(record.transition(JobState.WORKER_WAITING_QUESTION).transition(JobState.ANSWER_PENDING).state, JobState.ANSWER_PENDING)
+            resumed = record.transition(JobState.ACK_SENT).transition(JobState.DELEGATION_PENDING).transition(JobState.WORKER_RUNNING).transition(JobState.WORKER_WAITING_QUESTION).transition(JobState.ANSWER_PENDING)
+            self.assertEqual(resumed.state, JobState.ANSWER_PENDING)
 
     def test_qanda_strict_parse_and_answer_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
