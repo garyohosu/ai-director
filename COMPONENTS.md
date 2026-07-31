@@ -20,5 +20,5 @@
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: 作業中（次のdirectorコミットで記録）
+- Commit: `3186c62e257b1c24d6f40d174f1f0a6a24061e89` (Q009・WAITING_FOR_WORKER実装)
 - 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Knowledge Index、Context Packet、Outbox復旧を反映済み
