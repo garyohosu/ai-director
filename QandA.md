@@ -121,3 +121,17 @@
 - Reason: 同一内容のQ006に対する確定済み回答を再利用した。
 - Reused-From: Q006
 - Answered-At: 2026-07-31T05:39:39Z
+
+## Q009
+
+- Status: OPEN
+- Request-ID: DIAG-20260731T-REAL03-INVOCATION
+- Decision-ID: DEC-DIAG-REAL03-01
+- From: director_diagnostic
+- To: human_controller
+- Severity: HIGH
+- Blocking: YES
+- Category: PROTOCOL
+- Question: director Python CLIをorchestratorの一つのInvocationとして起動した場合、処理済みを示すInvocation-ID付き終端通知をdirectorが送信する契約にするか、orchestratorがdirector専用のstdout成功契約を検証するか？
+- Proposed-Answer: 人間が正式な通信契約と通知先を確定する。
+- Evidence: REAL03ではdirectorがACKと委任メールを送信したが、Invocation-ID付きのWAITING_FOR_DECISION/COMPLETED/FAILED通知がなく、orchestratorがNO_REPLYと分類した。director起動に関する修正は行っていない。
