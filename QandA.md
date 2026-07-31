@@ -124,7 +124,7 @@
 
 ## Q009
 
-- Status: OPEN
+- Status: ANSWERED
 - Request-ID: DIAG-20260731T-REAL03-INVOCATION
 - Decision-ID: DEC-DIAG-REAL03-01
 - From: director_diagnostic
@@ -135,3 +135,7 @@
 - Question: director Python CLIをorchestratorの一つのInvocationとして起動した場合、処理済みを示すInvocation-ID付き終端通知をdirectorが送信する契約にするか、orchestratorがdirector専用のstdout成功契約を検証するか？
 - Proposed-Answer: 人間が正式な通信契約と通知先を確定する。
 - Evidence: REAL03ではdirectorがACKと委任メールを送信したが、Invocation-ID付きのWAITING_FOR_DECISION/COMPLETED/FAILED通知がなく、orchestratorがNO_REPLYと分類した。director起動に関する修正は行っていない。
+- Answered-By: human_controller
+- Decision: directorも他のエージェントと同様に、Invocation-ID付きのメールで起動単位の終了状態を通知する。stdoutおよび終了コード0だけではInvocation成功と判定しない。directorがworkerへ委任して自身の処理を終了する場合は、WAITING_FOR_WORKERを送信する。
+- Reason: 全エージェントでInvocation終了契約を統一し、NO_REPLY判定、再起動、状態復旧、将来のチャネル差し替えを一貫して扱うため。
+- Answered-At: 2026-07-31T07:00:00Z

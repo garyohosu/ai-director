@@ -48,7 +48,7 @@ director が mail 宛に指示メールを送信すると、orchestrator が未�
 
 orchestrator/SPEC.md 30章「返信メールの確認」は、CLIを起動したAIが元メールの送信者（または本文が明示する返信先UID）へ返信することを前提に、返信がなければ`NO_REPLY`をログ・通知する。directorは複数エージェント間の仲介・転送を行うため、起動契機となった元メールの送信者と、判断結果に基づく次の指示の送信先が一致しないことが構造的に生じる。
 
-暫定方針（QandA.md Q004、人間の最終承認待ち）: directorは、起動契機となった元メールの送信者（本文に有効な返信先UIDの指定があればそのUID）へ、判断結果に基づく指示メールとは別に、短い受理通知（ACK。処理不要である旨を明記し、追加のAI起動を誘発しない文面とする）を必ず返信する。ACKの送信をもってorchestratorのreply-check（30章）を満たす。判断結果に基づく実際の指示メール・完了報告・HUMAN_REQUIRED要求は、Decision-ID単位で別途送信する（6章）。
+Q009の正式回答により、director自身も他エージェントと同じInvocation終端通知契約を使う。ACK・委任メール送信・`WAITING_FOR_WORKER`通知は同じJob-ID、Decision-ID、director Invocation-IDを保持する。stdoutや終了コード0だけではInvocation成功と判定しない。
 
 ## 3. 前提条件と実行環境
 
@@ -92,8 +92,9 @@ COMPLETED         … この依頼IDに対する一連の処理が完了した
 HUMAN_REQUIRED    … 自動処理を停止し、人間の判断を待っている
 
 WAITING_FOR_DECISION … 作業AIがBlocking質問を送信し、質問結果JSONとcheckpointを報告して終了した状態。Job全体は非終端だが、そのCLI起動単位は正常終了とする。同一CLIプロセス内で回答を待たない。
+WAITING_FOR_WORKER … directorがworkerへ委任メールを送信し、委任メールIDとcheckpointを保存したうえで、起動元へInvocation-ID付き通知を送信して終了した状態。Job全体は非終端で、workerの別Invocationを待つ。stdoutや終了コード0では代用できない。
 
-作業AIの質問手順は「QandA.mdへOPEN質問を追加 → 質問メール送信 → `agent_reply.py wait --result-file`でWAITING_FOR_DECISION送信 → checkpoint保存確認 → 終了コード0」とする。directorは質問とWAITING通知を受信した後、`DECISION_PENDING`へ進む。
+作業AIの質問手順は「QandA.mdへOPEN質問を追加 → 質問メール送信 → `agent_reply.py wait --result-file`でWAITING_FOR_DECISION送信 → checkpoint保存確認 → 終了コード0」とする。directorは質問とWAITING通知を受信した後、`DECISION_PENDING`へ進む。directorの委任手順は「起動元へACK → workerへ委任 → 委任メールIDをJob状態へ保存 → checkpoint保存 → 起動元へWAITING_FOR_WORKER → Invocation状態を永続化 → 終了コード0」とする。WAITING通知送信に失敗した場合、director Invocationは成功扱いにしない。
 
 orchestratorのCLIタイムアウト通知は`status: TIMED_OUT`、`job_id`、`decision_id`、`agent_uid`、`exit_code`、`timeout_sec`、`stdout_log`、`stderr_log`、`occurred_at`を含む構造化フィールドを持つ。質問メールとタイムアウト通知が併存する場合、質問成功へ補正せず、当該CLI実行をタイムアウトとして記録し、directorは原則`HUMAN_REQUIRED`へ遷移する。
 ```
@@ -108,7 +109,7 @@ OUTBOX_PENDING   -> HUMAN_REQUIRED   （Decision-IDの重複検出。6章）
 HUMAN_REQUIRED   -> DECISION_PENDING または OUTBOX_PENDING （人間の承認後。9章）
 ```
 
-各状態遷移は、遷移前にジャーナルへ書き込みを行ってから対応する操作（メール送信、指揮AIへの判断依頼など）を実行する。すなわち「状態を書いてから行動する」順序を守り、「行動してから状態を書く」順序にしない。
+各状態遷移は、遷移前にジャーナルへ書き込みを行ってから対応する操作（メール送信、指揮AIへの判断依頼など）を実行する。すなわち「状態を書いてから行動する」順序を守り、「行動してから状態を書く」順序にしない。委任メール送信に失敗した場合はWAITING_FOR_WORKERへ進まず、WAITING通知送信に失敗した場合はInvocation成功として扱わない。
 
 ### クラッシュ復旧
 

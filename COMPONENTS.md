@@ -12,13 +12,13 @@
 ## orchestrator
 
 - Repository: https://github.com/garyohosu/ai-orchestrator
-- Commit: `a180e07b8118a9fa4ebf7065ddbb5c50b432248c` ("fix: allow adapter tests to select mail database")
+- Commit: `d21218c13787e869254f42050ec256216a26e013` ("feat: support waiting-for-worker invocation completion")
 - Local path: `C:\PROJECT\ai-orchestrator`
 - 状態: `agent_reply` サポート環境変数注入、Decision-ID・Invocation-ID保持、directorアダプター、WAITING_FOR_DECISIONおよび構造化タイムアウト通知を反映済み
-- テスト結果: 131/131件成功。起動前最大メールID、Invocation-ID一致、ACKのみの未完了判定、WAITING/終端通知の起動中検知、NO_REPLY抑止、猶予後安全停止を含む
+- テスト結果: 133/133件成功。起動前最大メールID、Invocation-ID一致、ACKのみの未完了判定、WAITING_FOR_DECISION/WAITING_FOR_WORKER/終端通知の起動中検知、NO_REPLY抑止、猶予後安全停止を含む
 
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: `852cb598ec02cb4bdeed2f62536d8b5a53280d99` (REAL03起動経路診断・Q009記録)
+- Commit: 作業中（次のdirectorコミットで記録）
 - 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Knowledge Index、Context Packet、Outbox復旧を反映済み

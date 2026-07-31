@@ -74,6 +74,7 @@ class DirectorEngine:
         self.qanda_path = self.root / "QandA.md"
         self.pending_path = self.runtime / "pending.json"
         self.uid = self._register_and_persist()
+        self.invocation_id = os.environ.get("INVOCATION_ID", "")
         self.uids = self._register_names()
         self.log_path = self.root / "director" / "logs" / "director.jsonl"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +122,37 @@ class DirectorEngine:
     def _ack(self, record: JobRecord, recipient: str) -> None:
         ack_decision = f"{record.decision_id}-ACK"
         subject = f"[{record.job_id}] [{ack_decision}] STATUS: ACK"
-        self._send(record, recipient, ack_decision, subject, json.dumps({"status": "ACK_RECEIVED", "job_id": record.job_id, "decision_id": record.decision_id}, ensure_ascii=False))
+        self._send(record, recipient, ack_decision, subject, json.dumps({"status": "ACK_RECEIVED", "job_id": record.job_id, "decision_id": record.decision_id, "invocation_id": self.invocation_id}, ensure_ascii=False))
+
+    def _save_worker_wait_checkpoint(self, record: JobRecord) -> str:
+        path = self.root / "director" / "checkpoints" / record.job_id / f"{record.decision_id}-worker-wait.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            "invocation_id": self.invocation_id,
+            "state": JobState.WAITING_FOR_WORKER,
+            "delegate_mail_id": record.delegate_mail_id,
+            "next_step": "workerからのInvocationを待つ",
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return str(path.relative_to(self.root))
+
+    def _waiting_for_worker(self, record: JobRecord) -> JobRecord:
+        record = record.transition(JobState.WAITING_FOR_WORKER)
+        record.latest_invocation_id = self.invocation_id
+        record.latest_checkpoint = self._save_worker_wait_checkpoint(record)
+        self.jobs.save(record)
+        body = json.dumps({
+            "status": "WAITING_FOR_WORKER",
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            "invocation_id": self.invocation_id,
+            "delegate_mail_id": record.delegate_mail_id,
+            "checkpoint": record.latest_checkpoint,
+            "summary": "workerへ委任済み。Jobは非終端でworkerの応答を待つ。",
+        }, ensure_ascii=False)
+        self._send(record, record.requester_uid, f"{record.decision_id}-WAITING-FOR-WORKER", f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] STATUS: WAITING_FOR_WORKER", body)
+        return record
 
     def _create_record(self, message: dict) -> JobRecord:
         job_id = _id(JOB_RE, message["subject"], "Job-ID")
@@ -130,7 +161,7 @@ class DirectorEngine:
         if existing:
             return existing
         decision_id = _id(DEC_RE, message["subject"], "Decision-ID")
-        record = JobRecord(job_id, message["mail_id"], message["sender_uid"], self.uids["worker"], self.uids["commander"], decision_id, JobState.DISCOVERED, request_summary=message.get("body", "")[:4000])
+        record = JobRecord(job_id, message["mail_id"], message["sender_uid"], self.uids["worker"], self.uids["commander"], decision_id, JobState.DISCOVERED, request_summary=message.get("body", "")[:4000], latest_invocation_id=self.invocation_id)
         self.jobs.save(record)
         return record
 
@@ -147,8 +178,8 @@ class DirectorEngine:
             "For a blocking question, send a mail containing QANDA and the Q-number.",
             "Original request summary: " + message.get("body", "")[:4000],
         ])
-        self._send(record, record.current_agent_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] DELEGATE", body)
-        record = record.transition(JobState.WORKER_RUNNING)
+        record.delegate_mail_id = self._send(record, record.current_agent_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] DELEGATE", body)
+        record = self._waiting_for_worker(record)
         record.round_count += 1
         self.jobs.save(record)
         return record

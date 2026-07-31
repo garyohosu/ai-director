@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -57,6 +58,35 @@ class FakeMail:
 
 
 class DirectorUnitTests(unittest.TestCase):
+    def test_director_delegate_waits_with_invocation_bound_terminal_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            previous = os.environ.get("INVOCATION_ID")
+            os.environ["INVOCATION_ID"] = "INV-DIRECTOR-001"
+            try:
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                human = engine.uids["human"]
+                mail.send_mail(human, engine.uid, "[JOB-WAIT-001] [DEC-WAIT-001] request", "safe task")
+                engine.process_once()
+            finally:
+                if previous is None:
+                    os.environ.pop("INVOCATION_ID", None)
+                else:
+                    os.environ["INVOCATION_ID"] = previous
+            record = engine.jobs.load("JOB-WAIT-001")
+            self.assertEqual(record.state, JobState.WAITING_FOR_WORKER)
+            self.assertGreater(record.delegate_mail_id, 0)
+            self.assertTrue(record.latest_checkpoint.endswith("-worker-wait.json"))
+            outbound = [m for m in mail.messages if m["sender_uid"] == engine.uid]
+            self.assertEqual(len(outbound), 3)
+            self.assertIn("STATUS: ACK", outbound[0]["subject"])
+            self.assertIn("DELEGATE", outbound[1]["subject"])
+            self.assertIn("STATUS: WAITING_FOR_WORKER", outbound[2]["subject"])
+            for message in outbound:
+                self.assertIn("INV-DIRECTOR-001", message["subject"] + message["body"])
+
     def test_job_store_and_safe_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))
@@ -68,6 +98,7 @@ class DirectorUnitTests(unittest.TestCase):
             self.assertEqual(record.transition(JobState.ACK_SENT).state, JobState.ACK_SENT)
             resumed = record.transition(JobState.ACK_SENT).transition(JobState.DELEGATION_PENDING).transition(JobState.WORKER_RUNNING).transition(JobState.WORKER_WAITING_QUESTION).transition(JobState.ANSWER_PENDING)
             self.assertEqual(resumed.state, JobState.ANSWER_PENDING)
+            self.assertEqual(record.transition(JobState.ACK_SENT).transition(JobState.DELEGATION_PENDING).transition(JobState.WAITING_FOR_WORKER).state, JobState.WAITING_FOR_WORKER)
 
     def test_invocation_id_is_persisted_and_restored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,12 +1,12 @@
 ---
-source_commit: "fb83954a69306050c18eede211600e83e688ae0c"
-generated_at: "2026-07-31T06:53:40Z"
+source_commit: "80448fafddfe0eb136d13c1157a466e1690f51ed"
+generated_at: "2026-07-31T07:04:56Z"
 source_files:
   - director/SPEC.md
   - QandA.md
 source_sha256:
-  director/SPEC.md: 7ec7537078927f4a41eef1ac3ab85124381395f422b43680cb6e455a314504c6
-  QandA.md: f81bca83ccc334b5af3ff5a62fe7f073208dd1cf14cc99ff020f90ae56b91714
+  director/SPEC.md: bf35d3071169ece1868f34ee69c171105e2175c913a5ae48795534ff4f391d82
+  QandA.md: a47a6b1d345f01b6393a37ada49a6b70b5bcae199ba6ec7b7982b7d84eea20a9
 ---
 # Decisions
 
@@ -19,3 +19,4 @@ QandA.mdでANSWEREDになった正式判断の索引。内容の正本は必ずQ
 - [Q005](../../QandA.md#q005): Question: orchestratorのdirector対応（director用CLIアダプターおよび設定追加）の扱いについて。
 - [Q006](../../QandA.md#q006): Question: 成果物ファイルは末尾改行なしの一行で作成してよいですか？
 - [Q007](../../QandA.md#q007): Question: 成果物は指定文字列の一行を末尾改行なしで作成してよいですか？
+- [Q009](../../QandA.md#q009): Question: director Python CLIをorchestratorの一つのInvocationとして起動した場合、処理済みを示すInvocation-ID付き終端通知をdirectorが送信する契約にするか、orchestratorがdirector専用のstdout成功契約を検証するか？
