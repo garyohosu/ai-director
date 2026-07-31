@@ -14,12 +14,14 @@ from pathlib import Path
 
 try:
     from .context_packet import ContextPacketBuilder
+    from .knowledge import KnowledgeIndex
     from .decision import DecisionError, parse_decision
     from .outbox import Outbox, OutboxEntry, OutboxError
     from .qanda import QandaError, answer_question, find_open_blocking, parse_qanda
     from .state_machine import JobRecord, JobState, JobStore, StateError, utc_now, validate_job_id
 except ImportError:  # direct ``py director/director.py`` compatibility
     from context_packet import ContextPacketBuilder
+    from knowledge import KnowledgeIndex
     from decision import DecisionError, parse_decision
     from outbox import Outbox, OutboxEntry, OutboxError
     from qanda import QandaError, answer_question, find_open_blocking, parse_qanda
@@ -68,6 +70,7 @@ class DirectorEngine:
         self.jobs = JobStore(self.runtime / "jobs")
         self.outbox = Outbox(self.runtime / "outbox", self.mail)
         self.packet_builder = ContextPacketBuilder(self.root, int(self.config.get("context_max_bytes", 32 * 1024)))
+        self.knowledge = KnowledgeIndex(self.root, int(self.config.get("knowledge_page_max_bytes", 12 * 1024)))
         self.qanda_path = self.root / "QandA.md"
         self.pending_path = self.runtime / "pending.json"
         self.uid = self._register_and_persist()
@@ -152,6 +155,7 @@ class DirectorEngine:
 
     def _build_packet(self, record: JobRecord, question: str) -> tuple[str, int, int]:
         path = self.root / "director" / "checkpoints" / record.job_id / f"{record.decision_id}-context.md"
+        knowledge_pages = self.knowledge.select(question)
         result = self.packet_builder.build(
             record.job_id, record.decision_id, role="codex_commander", task=question, state=record.state,
             completed=[f"request mail {record.request_mail_id} received", "worker delegation sent", f"Original request: {record.request_summary[:2000]}"],
@@ -159,6 +163,7 @@ class DirectorEngine:
             target_files=record.artifact_paths, git_summary="git diff summary is intentionally omitted unless supplied by the worker",
             test_summary="latest worker test result is pending", prohibitions=["no director self-change", "no commit or push"],
             reply_commands=["send ACK", "send one valid decision JSON and terminal status"], completion="Return a valid decision JSON with matching Job-ID and Decision-ID.", path=path,
+            knowledge_pages=knowledge_pages,
         )
         record.latest_checkpoint = str(path.relative_to(self.root))
         self.jobs.save(record)

@@ -12,13 +12,13 @@
 ## orchestrator
 
 - Repository: https://github.com/garyohosu/ai-orchestrator
-- Commit: `d2986fe106ef72f19e5d8d540f19148ab7caf7fc` ("feat: support director waiting and timeout handoff")
+- Commit: `d39034a` ("fix: stop CLI on terminal mail notifications")
 - Local path: `C:\PROJECT\ai-orchestrator`
 - 状態: `agent_reply` サポート環境変数注入、Decision-ID保持、directorアダプター、WAITING_FOR_DECISIONおよび構造化タイムアウト通知を反映済み
-- テスト結果: 125/125件成功
+- テスト結果: 128/128件成功。WAITING/終端通知の起動中検知、猶予後安全停止、外側タイムアウト順序を含む
 
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: `8b17efae5a58881e3107e9da86fd1fe94cc17094` ("fix: include resume memory in context packets")
-- 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Context Packet、Outbox復旧を反映済み
+- Commit: `PENDING` (Knowledge IndexとContext Packet連携を含む今回のコミット)
+- 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Knowledge Index、Context Packet、Outbox復旧を反映済み

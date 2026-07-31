@@ -12,6 +12,10 @@ director は、複数のAIエージェント（Claude Code、Codex CLIなど）�
 
 director自身は作業AI・指揮AIいずれのCLIプロセスも直接起動しない。すべてのAI起動はorchestratorへ委ね、directorとorchestrator・作業AI・指揮AIとの間の情報伝達はmail経由のメッセージ交換に統一する（2章）。
 
+## 1.1 Knowledge Index
+
+`director/knowledge/` は標準Markdownだけで構成する短い索引である。正式情報の優先順位は、人間の最新指示、`QandA.md`のANSWERED、`SPEC.md`、`COMPONENTS.md`、Job状態とcheckpoint、Knowledge Index、mail履歴、AIの提案とする。Knowledge Indexが正式仕様と矛盾する場合は`QandA.md`と`SPEC.md`を優先する。各ページは生成時刻、source commit、参照元ファイル、SHA-256を持ち、LLMなしのPython生成を許可する。Context Packetには判断に必要なページだけを含める。
+
 ## 2. 責務の分離とシステム境界
 
 | コンポーネント | 主要責務 | 境界・制約 |
