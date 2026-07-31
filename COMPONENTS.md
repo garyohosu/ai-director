@@ -12,13 +12,13 @@
 ## orchestrator
 
 - Repository: https://github.com/garyohosu/ai-orchestrator
-- Commit: `d39034a` ("fix: stop CLI on terminal mail notifications")
+- Commit: `a180e07b8118a9fa4ebf7065ddbb5c50b432248c` ("fix: allow adapter tests to select mail database")
 - Local path: `C:\PROJECT\ai-orchestrator`
-- 状態: `agent_reply` サポート環境変数注入、Decision-ID保持、directorアダプター、WAITING_FOR_DECISIONおよび構造化タイムアウト通知を反映済み
-- テスト結果: 128/128件成功。WAITING/終端通知の起動中検知、猶予後安全停止、外側タイムアウト順序を含む
+- 状態: `agent_reply` サポート環境変数注入、Decision-ID・Invocation-ID保持、directorアダプター、WAITING_FOR_DECISIONおよび構造化タイムアウト通知を反映済み
+- テスト結果: 131/131件成功。起動前最大メールID、Invocation-ID一致、ACKのみの未完了判定、WAITING/終端通知の起動中検知、NO_REPLY抑止、猶予後安全停止を含む
 
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: `3b30c5e` ("feat: add lightweight knowledge index")
+- Commit: 作業中（次のdirectorコミットで記録）
 - 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Knowledge Index、Context Packet、Outbox復旧を反映済み

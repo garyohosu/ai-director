@@ -10,6 +10,7 @@ from pathlib import Path
 
 JOB_RE = re.compile(r"^JOB-[A-Za-z0-9._-]+$")
 DECISION_RE = re.compile(r"^DEC-[A-Za-z0-9._-]+$")
+INVOCATION_RE = re.compile(r"^INV-[A-Za-z0-9._-]+$")
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -71,6 +72,12 @@ def validate_decision_id(value: str) -> str:
     return value
 
 
+def validate_invocation_id(value: str) -> str:
+    if value and not INVOCATION_RE.fullmatch(value):
+        raise StateError(f"invalid Invocation-ID: {value!r}")
+    return value
+
+
 @dataclass
 class JobRecord:
     job_id: str
@@ -88,10 +95,12 @@ class JobRecord:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     request_summary: str = ""
+    latest_invocation_id: str = ""
 
     def __post_init__(self) -> None:
         validate_job_id(self.job_id)
         validate_decision_id(self.decision_id)
+        validate_invocation_id(self.latest_invocation_id)
         if self.state not in {v for k, v in vars(JobState).items() if not k.startswith("_") and isinstance(v, str)}:
             raise StateError(f"invalid state: {self.state!r}")
 
@@ -129,6 +138,7 @@ class JobStore:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
         data.setdefault("request_summary", "")
+        data.setdefault("latest_invocation_id", "")
         return JobRecord(**data)
 
     def list_records(self) -> list[JobRecord]:
@@ -136,5 +146,6 @@ class JobStore:
         for path in sorted(self.root.glob("JOB-*.json")):
             data = json.loads(path.read_text(encoding="utf-8"))
             data.setdefault("request_summary", "")
+            data.setdefault("latest_invocation_id", "")
             records.append(JobRecord(**data))
         return records

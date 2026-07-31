@@ -69,6 +69,16 @@ class DirectorUnitTests(unittest.TestCase):
             resumed = record.transition(JobState.ACK_SENT).transition(JobState.DELEGATION_PENDING).transition(JobState.WORKER_RUNNING).transition(JobState.WORKER_WAITING_QUESTION).transition(JobState.ANSWER_PENDING)
             self.assertEqual(resumed.state, JobState.ANSWER_PENDING)
 
+    def test_invocation_id_is_persisted_and_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            record = JobRecord("JOB-INV-001", 1, "UID000001", "UID000002", "UID000003", "DEC-INV-001", JobState.WORKER_RUNNING, latest_invocation_id="INV-INV-001")
+            store.save(record)
+            restored = store.load(record.job_id)
+            self.assertEqual(restored.latest_invocation_id, "INV-INV-001")
+            with self.assertRaises(StateError):
+                JobRecord("JOB-INV-002", 1, "UID000001", "UID000002", "UID000003", "DEC-INV-002", JobState.WORKER_RUNNING, latest_invocation_id="DEC-NOT-INV")
+
     def test_qanda_strict_parse_and_answer_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "QandA.md"

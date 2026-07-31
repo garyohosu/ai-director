@@ -104,13 +104,15 @@ def validate_and_read_result_file(project_root: Path, file_path_str: str) -> dic
     return data
 
 
-def validate_wait_payload(project_root: Path, payload: dict, job_id: str, decision_id: str | None) -> dict:
+def validate_wait_payload(project_root: Path, payload: dict, job_id: str, decision_id: str | None, invocation_id: str | None = None) -> dict:
     if payload.get("status") != "WAITING_FOR_DECISION":
         raise ValueError("wait result status must be WAITING_FOR_DECISION")
     if payload.get("job_id") != job_id:
         raise ValueError("wait result Job-ID does not match JOB_ID")
     if decision_id and payload.get("decision_id") != decision_id:
         raise ValueError("wait result Decision-ID does not match DECISION_ID")
+    if invocation_id and payload.get("invocation_id") not in (None, invocation_id):
+        raise ValueError("wait result Invocation-ID does not match INVOCATION_ID")
     qanda_ids = payload.get("qanda_ids")
     if not isinstance(qanda_ids, list) or not qanda_ids or not all(isinstance(item, str) and _QANDA_ID_RE.fullmatch(item) for item in qanda_ids):
         raise ValueError("qanda_ids must contain one or more valid Q&A IDs")
@@ -175,6 +177,7 @@ def main() -> int:
     reply_to_uid = os.environ.get("REPLY_TO_UID")
     job_id = os.environ.get("JOB_ID")
     decision_id = os.environ.get("DECISION_ID")
+    invocation_id = os.environ.get("INVOCATION_ID")
     project_path_str = os.environ.get("PROJECT_PATH", ".")
 
     if not all([agent_uid, reply_to_uid, job_id]):
@@ -196,12 +199,13 @@ def main() -> int:
 
     act_str = args.action.upper()
     dec_str = decision_id or "DEC-NONE"
-    subject = f"[{job_id}] [{dec_str}] STATUS: {act_str}"
+    inv_str = invocation_id or "INV-NOT-SET"
+    subject = f"[{job_id}] [{dec_str}] [{inv_str}] STATUS: {act_str}"
 
     # Persistent state tracking for deduplication & state transition rules
     state_dir = project_root / "director" / ".state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    state_file = state_dir / f"{job_id}_{dec_str}.json"
+    state_file = state_dir / f"{job_id}_{dec_str}_{inv_str}.json"
 
     current_state = None
     if state_file.is_file():
@@ -234,6 +238,7 @@ def main() -> int:
             "status": "ACK_RECEIVED",
             "job_id": job_id,
             "decision_id": decision_id,
+            "invocation_id": invocation_id,
             "agent_uid": agent_uid,
             "message": "Task instruction accepted and processing started.",
         }
@@ -247,12 +252,13 @@ def main() -> int:
 
     if args.action == "wait":
         try:
-            payload = validate_wait_payload(project_root, validate_and_read_result_file(project_root, args.result_file), job_id, decision_id)
+            payload = validate_wait_payload(project_root, validate_and_read_result_file(project_root, args.result_file), job_id, decision_id, invocation_id)
         except Exception as err:
             print(f"ERROR validating wait result file: {err}", file=sys.stderr)
             return 1
         payload["agent_uid"] = agent_uid
         payload["decision_id"] = decision_id
+        payload["invocation_id"] = invocation_id
         body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
         mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
         state_file.write_text(json.dumps({"status": "WAITING_FOR_DECISION", "updated_at": subject}), encoding="utf-8")
@@ -268,6 +274,7 @@ def main() -> int:
             "job_id": job_id,
             "decision_id": decision_id,
             "agent_uid": agent_uid,
+            "invocation_id": invocation_id,
             "error": str(err),
         }
         body_text = mask_secrets(
@@ -280,6 +287,10 @@ def main() -> int:
             body_text,
             **kwargs,
         )
+        return 1
+
+    if invocation_id and payload.get("invocation_id") not in (None, invocation_id):
+        print("ERROR: result Invocation-ID does not match INVOCATION_ID", file=sys.stderr)
         return 1
 
     status_code = "COMPLETED" if args.action == "complete" else "FAILED"

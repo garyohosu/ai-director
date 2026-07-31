@@ -330,6 +330,12 @@ class DirectorEngine:
         if message["mail_id"] in record.handled_mail_ids:
             return record
         record.handled_mail_ids.append(message["mail_id"])
+        try:
+            payload = json.loads(message.get("body", ""))
+            if isinstance(payload, dict) and isinstance(payload.get("invocation_id"), str):
+                record.latest_invocation_id = payload["invocation_id"]
+        except (TypeError, json.JSONDecodeError):
+            pass
         self.jobs.save(record)
         sender = message["sender_uid"]
         subject = message.get("subject", "")
