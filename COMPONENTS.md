@@ -20,5 +20,5 @@
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: `PENDING` (Knowledge IndexとContext Packet連携を含む今回のコミット)
+- Commit: `3b30c5e` ("feat: add lightweight knowledge index")
 - 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Knowledge Index、Context Packet、Outbox復旧を反映済み
