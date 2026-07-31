@@ -102,3 +102,17 @@
 - Decision: 成果物ファイルは、指定された文字列の一行を末尾改行なしで作成する。
 - Reason: 実AI試験では成果物のバイト列とSHA-256を完全一致で検証するため。
 - Answered-At: 2026-07-31T04:57:29Z
+
+## Q007
+
+- Status: OPEN
+- Request-ID: JOB-20260731T141500Z-REAL02
+- Decision-ID: DEC-20260731T141500Z-01-BEEF
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物は指定文字列の一行を末尾改行なしで作成してよいですか？
+- Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
+- Evidence: 新規DBの実AI試験依頼
