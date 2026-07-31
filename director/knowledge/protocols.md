@@ -1,6 +1,6 @@
 ---
-source_commit: "3a796666c9bb0d8cd1553c048f7a0d179f1f3cdc"
-generated_at: "2026-07-31T05:57:02Z"
+source_commit: "c48df2e420041e999dd190351de42296cb5c4a4e"
+generated_at: "2026-07-31T06:02:39Z"
 source_files:
   - director/SPEC.md
   - QandA.md
