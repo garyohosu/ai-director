@@ -20,5 +20,5 @@
 ## director
 
 - Repository: https://github.com/garyohosu/ai-director
-- Commit: `bc332307dd60ae0a8175e8c475ff971ce12e21a4` ("feat: add director waiting decision loop")
+- Commit: `8b17efae5a58881e3107e9da86fd1fe94cc17094` ("fix: include resume memory in context packets")
 - 状態: WAITING_FOR_DECISION、構造化判断、Q&A再利用、Context Packet、Outbox復旧を反映済み
