@@ -5,10 +5,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-
 import sys
-_paths = [Path(__file__).parents[2] / "orchestrator", Path(__file__).parents[2] / "mail", Path(__file__).parents[2]]
-sys.path[:0] = [str(_path) for _path in _paths if str(_path) not in sys.path]
+
+from director.tests import helper
 
 from mail import initialize, send_mail, find_mails
 from config import AgentDefinition
@@ -80,9 +79,13 @@ subprocess.check_call([sys.executable, str(project_path / "director" / "agent_re
         (self.root / "director").mkdir(parents=True, exist_ok=True)
         orig_agent_reply = Path(__file__).parents[2] / "director" / "agent_reply.py"
         (self.root / "director" / "agent_reply.py").write_text(orig_agent_reply.read_text(encoding="utf-8"), encoding="utf-8")
+        orig_ids = Path(__file__).parents[2] / "director" / "ids.py"
+        (self.root / "director" / "ids.py").write_text(
+            orig_ids.read_text(encoding="utf-8"), encoding="utf-8"
+        )
         (self.root / "mail").mkdir(parents=True, exist_ok=True)
         for name in ["__init__.py", "agent_mail.py"]:
-            (self.root / "mail" / name).write_bytes((Path(__file__).parents[2] / "mail" / name).read_bytes())
+            (self.root / "mail" / name).write_bytes((helper.MAIL_PATH / "mail" / name).read_bytes())
 
         self.mail_adapter = MailModuleAdapter(self.root / "mail", db_path=self.db_path)
         self.claude_uid = self.mail_adapter.register_user("claude_designer")

@@ -8,6 +8,11 @@ import re
 import sys
 from pathlib import Path
 
+if __package__:
+    from .ids import InvocationIdError, resolve_invocation_id
+else:
+    from ids import InvocationIdError, resolve_invocation_id
+
 _SECRET_MARKERS = (
     "api_key",
     "apikey",
@@ -75,32 +80,49 @@ def validate_and_read_result_file(project_root: Path, file_path_str: str) -> dic
     if resolved.stat().st_size > 10 * 1024 * 1024:
         raise ValueError("File size exceeds 10MB limit")
 
-    content = resolved.read_bytes().decode("utf-8")
-    data = json.loads(content)
+    try:
+        content = resolved.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as err:
+        raise ValueError(f"Result file is not valid UTF-8: {file_path_str}") from err
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"Result file contains invalid JSON: {file_path_str}") from err
     if not isinstance(data, dict):
         raise ValueError("Result file JSON must be an object")
 
     artifacts = data.get("artifacts", [])
-    if isinstance(artifacts, list):
-        for art in artifacts:
-            if isinstance(art, dict) and "path" in art:
-                art_path_str = art["path"]
-                art_raw = Path(art_path_str)
-                if art_raw.is_absolute():
-                    raise ValueError(f"Absolute artifact path not allowed: {art_path_str}")
-                art_path = (project_root / art_raw).resolve()
-                try:
-                    art_path.relative_to(root_resolved)
-                except ValueError as err:
-                    raise ValueError(f"Artifact path outside project_path rejected: {art_path_str}") from err
-                if not art_path.is_file():
-                    raise ValueError(f"Artifact file does not exist or is not regular: {art_path_str}")
-                actual_sha = hashlib.sha256(art_path.read_bytes()).hexdigest()
-                if "sha256" in art and art["sha256"] != actual_sha:
-                    raise ValueError(
-                        f"SHA-256 mismatch for artifact {art['path']}: expected {art['sha256']}, got {actual_sha}"
-                    )
-                art["sha256"] = actual_sha
+    if not isinstance(artifacts, list):
+        raise ValueError("Result file artifacts must be an array")
+    for index, art in enumerate(artifacts):
+        if not isinstance(art, dict):
+            raise ValueError(f"Result file artifact at index {index} must be an object")
+        if "path" not in art or not isinstance(art["path"], str) or not art["path"]:
+            raise ValueError(
+                f"Result file artifact at index {index} must contain a non-empty path"
+            )
+        art_path_str = art["path"]
+        art_raw = Path(art_path_str)
+        if art_raw.is_absolute():
+            raise ValueError(f"Absolute artifact path not allowed: {art_path_str}")
+        art_path = (project_root / art_raw).resolve()
+        try:
+            art_path.relative_to(root_resolved)
+        except ValueError as err:
+            raise ValueError(
+                f"Artifact path outside project_path rejected: {art_path_str}"
+            ) from err
+        if not art_path.is_file():
+            raise ValueError(
+                f"Artifact file does not exist or is not regular: {art_path_str}"
+            )
+        actual_sha = hashlib.sha256(art_path.read_bytes()).hexdigest()
+        if "sha256" in art and art["sha256"] != actual_sha:
+            raise ValueError(
+                f"SHA-256 mismatch for artifact {art['path']}: "
+                f"expected {art['sha256']}, got {actual_sha}"
+            )
+        art["sha256"] = actual_sha
     return data
 
 
@@ -177,7 +199,6 @@ def main() -> int:
     reply_to_uid = os.environ.get("REPLY_TO_UID")
     job_id = os.environ.get("JOB_ID")
     decision_id = os.environ.get("DECISION_ID")
-    invocation_id = os.environ.get("INVOCATION_ID")
     project_path_str = os.environ.get("PROJECT_PATH", ".")
 
     if not all([agent_uid, reply_to_uid, job_id]):
@@ -197,23 +218,64 @@ def main() -> int:
             db_p = (project_root / db_p).resolve()
         kwargs["db_path"] = db_p
 
+    try:
+        final_inv_id = resolve_invocation_id(os.environ)
+    except InvocationIdError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 1
+
+    payload = None
+    if args.action != "ack":
+        try:
+            payload = validate_and_read_result_file(project_root, args.result_file)
+        except (OSError, ValueError) as err:
+            print(f"ERROR validating result file: {err}", file=sys.stderr)
+            return 1
+
+        payload_invocation_id = payload.get("invocation_id")
+        explicit_invocation_id = (
+            "AI_INVOCATION_ID" in os.environ or "INVOCATION_ID" in os.environ
+        )
+        if payload_invocation_id is not None:
+            if not isinstance(payload_invocation_id, str) or not payload_invocation_id:
+                print(
+                    "ERROR: result Invocation-ID must be a non-empty string",
+                    file=sys.stderr,
+                )
+                return 1
+            if not explicit_invocation_id:
+                print(
+                    "ERROR: Invocation-ID is required by result file but not set in environment",
+                    file=sys.stderr,
+                )
+                return 1
+            if payload_invocation_id != final_inv_id:
+                print(
+                    "ERROR: Specified Invocation-ID "
+                    f"'{payload_invocation_id}' does not match environment '{final_inv_id}'",
+                    file=sys.stderr,
+                )
+                return 1
+
     act_str = args.action.upper()
     dec_str = decision_id or "DEC-NONE"
-    inv_str = invocation_id or "INV-NOT-SET"
-    subject = f"[{job_id}] [{dec_str}] [{inv_str}] STATUS: {act_str}"
+    subject = f"[{job_id}] [{dec_str}] [{final_inv_id}] STATUS: {act_str}"
 
     # Persistent state tracking for deduplication & state transition rules
     state_dir = project_root / "director" / ".state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    state_file = state_dir / f"{job_id}_{dec_str}_{inv_str}.json"
+    state_file = state_dir / f"{job_id}_{dec_str}_{final_inv_id}.json"
 
     current_state = None
     if state_file.is_file():
         try:
             state_data = json.loads(state_file.read_text(encoding="utf-8"))
+            if not isinstance(state_data, dict):
+                raise ValueError("state JSON must be an object")
             current_state = state_data.get("status")
-        except Exception:
-            current_state = None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as err:
+            print(f"ERROR reading Invocation state file: {err}", file=sys.stderr)
+            return 1
 
     target_status = {
         "ack": "ACK_RECEIVED",
@@ -238,7 +300,7 @@ def main() -> int:
             "status": "ACK_RECEIVED",
             "job_id": job_id,
             "decision_id": decision_id,
-            "invocation_id": invocation_id,
+            "invocation_id": final_inv_id,
             "agent_uid": agent_uid,
             "message": "Task instruction accepted and processing started.",
         }
@@ -252,52 +314,30 @@ def main() -> int:
 
     if args.action == "wait":
         try:
-            payload = validate_wait_payload(project_root, validate_and_read_result_file(project_root, args.result_file), job_id, decision_id, invocation_id)
-        except Exception as err:
+            assert payload is not None
+            payload = validate_wait_payload(
+                project_root, payload, job_id, decision_id, final_inv_id
+            )
+        except ValueError as err:
             print(f"ERROR validating wait result file: {err}", file=sys.stderr)
             return 1
         payload["agent_uid"] = agent_uid
         payload["decision_id"] = decision_id
-        payload["invocation_id"] = invocation_id
+        payload["invocation_id"] = final_inv_id
         body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
         mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
         state_file.write_text(json.dumps({"status": "WAITING_FOR_DECISION", "updated_at": subject}), encoding="utf-8")
         print(f"Report WAITING_FOR_DECISION sent to {reply_to_uid}")
         return 0
 
-    try:
-        payload = validate_and_read_result_file(project_root, args.result_file)
-    except Exception as err:
-        print(f"ERROR validating result file: {err}", file=sys.stderr)
-        err_dict = {
-            "status": "DELIVERY_FAILED",
-            "job_id": job_id,
-            "decision_id": decision_id,
-            "agent_uid": agent_uid,
-            "invocation_id": invocation_id,
-            "error": str(err),
-        }
-        body_text = mask_secrets(
-            json.dumps(err_dict, ensure_ascii=False, indent=2)
-        )
-        mail.send_mail(
-            agent_uid,
-            reply_to_uid,
-            f"[{job_id}] STATUS: DELIVERY_FAILED",
-            body_text,
-            **kwargs,
-        )
-        return 1
-
-    if invocation_id and payload.get("invocation_id") not in (None, invocation_id):
-        print("ERROR: result Invocation-ID does not match INVOCATION_ID", file=sys.stderr)
-        return 1
+    assert payload is not None
 
     status_code = "COMPLETED" if args.action == "complete" else "FAILED"
     payload["status"] = status_code
     payload["job_id"] = job_id
     payload["decision_id"] = decision_id
     payload["agent_uid"] = agent_uid
+    payload["invocation_id"] = final_inv_id
 
     body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
     mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
