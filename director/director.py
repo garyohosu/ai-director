@@ -274,7 +274,8 @@ class DirectorEngine:
                 "action": "ANSWER",
                 "reason": replay["reason"],
                 "context_packet": packet,
-                "instruction": "Start a new CLI context. Do not repeat the answered question. Send ACK, then COMPLETED or WAITING_FOR_DECISION only if strictly necessary.",
+                "instruction": "Start a new CLI context. Do not repeat the answered question. Use the mandatory reply_protocol commands for ACK and terminal COMPLETED/FAILED; never handcraft terminal mail. Send WAITING_FOR_DECISION only if strictly necessary.",
+                "reply_protocol": self._worker_reply_protocol(record),
             },
             ensure_ascii=False,
         )
@@ -703,6 +704,68 @@ class DirectorEngine:
         self.jobs.save(record)
         return record
 
+    @staticmethod
+    def _worker_reply_protocol(record: JobRecord) -> dict[str, object]:
+        """Return the mandatory product reporter contract for worker replies."""
+
+        result_prefix = (
+            f"director/runtime/agent-results/{record.job_id}/{record.decision_id}"
+        )
+        complete_path = f"{result_prefix}-complete.json"
+        wait_path = f"{result_prefix}-wait.json"
+        fail_path = f"{result_prefix}-fail.json"
+        return {
+            "mandatory": True,
+            "prohibition": (
+                "Do not call mail.send_mail or construct ACK/WAITING/COMPLETED/FAILED "
+                "mail JSON manually. Use director/agent_reply.py for every status reply."
+            ),
+            "ack_command": "py -3 director/agent_reply.py ack",
+            "result_directory": f"director/runtime/agent-results/{record.job_id}",
+            "complete_result_file": complete_path,
+            "wait_result_file": wait_path,
+            "fail_result_file": fail_path,
+            "wait_command": f"py -3 director/agent_reply.py wait --result-file {wait_path}",
+            "complete_command": f"py -3 director/agent_reply.py complete --result-file {complete_path}",
+            "fail_command": f"py -3 director/agent_reply.py fail --result-file {fail_path}",
+            "complete_result_example": {
+                "status": "COMPLETED",
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                "artifacts": [
+                    {
+                        "path": "replace-with-actual-project-relative-artifact-path",
+                        "sha256": "replace-with-actual-lowercase-sha256",
+                    }
+                ],
+            },
+            "wait_result_example": {
+                "status": "WAITING_FOR_DECISION",
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                "qanda_ids": ["replace-with-Q-number"],
+                "summary": "replace-with-blocking-question-summary",
+                "checkpoint": "replace-with-existing-project-relative-checkpoint",
+                "qanda_path": "QandA.md",
+            },
+            "fail_result_example": {
+                "status": "FAILED",
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                "reason": "replace-with-failure-reason",
+                "artifacts": [],
+            },
+            "completion_condition": (
+                "The chosen agent_reply.py command must finish with exit code 0; "
+                "otherwise the task is not reported complete."
+            ),
+            "terminal_contract": (
+                "agent_reply.py emits message_type=INVOCATION_RESULT and "
+                "task_eligible=true so Director is launched. A COMPLETED result file "
+                "must contain artifacts as a list of {path, sha256} objects."
+            ),
+        }
+
     def _delegate(self, record: JobRecord, message: dict) -> JobRecord:
         self._ack(record, record.requester_uid)
         record = record.transition(JobState.ACK_SENT)
@@ -717,7 +780,8 @@ class DirectorEngine:
                 **self._invocation_metadata(record),
                 "role": "claude_worker",
                 "task": "execute the requested work and report questions or completion",
-                "required": "send ACK and a terminal COMPLETED/FAILED/HUMAN_REQUIRED mail",
+                "required": "send ACK and a terminal COMPLETED/FAILED mail through the mandatory product reporter",
+                "reply_protocol": self._worker_reply_protocol(record),
                 "prohibitions": "do not modify director code, config, or SPEC; do not commit or push",
                 "blocking_question": "send JSON with message_type=QUESTION, task_eligible=true, Invocation lineage, and the Q-number",
                 "original_request_summary": message.get("body", "")[:4000],

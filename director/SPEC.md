@@ -398,3 +398,8 @@ directorが参照する正式仕様（本SPEC.md、mail/SPEC.md、orchestrator/S
   `trigger_mail_uid`として保持し、0へ戻さない。
 - worker失敗で人間確認へ遷移する場合、人間向け通知とは別に、起動元へ構造化した
   `InvocationResult=FAILED`を返信して当該Director Invocationを終端させる。
+- Directorがworkerへ送る初回TASKと再開TASKは、ACK/WAITING/COMPLETED/FAILEDを
+  `director/agent_reply.py`で送る必須コマンドを本文に含める。workerは終端メールを
+  手組みせず、製品reporterに`message_type=INVOCATION_RESULT`、`task_eligible=true`、
+  起動Invocation系譜を機械付与させる。`task_eligible=false`の手組み結果は制御通知として
+  除外されDirectorを起動しないため、正常完了として扱わない。

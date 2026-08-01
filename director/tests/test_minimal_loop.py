@@ -245,6 +245,18 @@ class DirectorUnitTests(unittest.TestCase):
             self.assertIn("STATUS: WAITING_FOR_WORKER", outbound[2]["subject"])
             for message in outbound:
                 self.assertIn("INV-DIRECTOR-001", message["subject"] + message["body"])
+            task_payload = json.loads(outbound[1]["body"])
+            protocol = task_payload["reply_protocol"]
+            self.assertTrue(protocol["mandatory"])
+            self.assertIn("agent_reply.py complete", protocol["complete_command"])
+            self.assertNotIn("<", protocol["complete_command"])
+            self.assertIn("task_eligible=true", protocol["terminal_contract"])
+            self.assertIn("Do not call mail.send_mail", protocol["prohibition"])
+            self.assertEqual(
+                protocol["complete_result_example"]["decision_id"],
+                "DEC-WAIT-001",
+            )
+            self.assertIn("exit code 0", protocol["completion_condition"])
 
     def test_job_store_and_safe_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -907,6 +919,22 @@ class DirectorUnitTests(unittest.TestCase):
             child_payload = json.loads(child_tasks[0]["body"])
             self.assertEqual(
                 child_payload["invocation_id"], "INV-DIRECTOR-SAVE-1"
+            )
+            self.assertIn(
+                "agent_reply.py complete",
+                child_payload["reply_protocol"]["complete_command"],
+            )
+            self.assertNotIn(
+                "<", child_payload["reply_protocol"]["complete_command"]
+            )
+            self.assertEqual(
+                child_payload["reply_protocol"]["complete_result_example"][
+                    "decision_id"
+                ],
+                recovered.decision_id,
+            )
+            self.assertIn(
+                "never handcraft terminal mail", child_payload["instruction"]
             )
             self.assertEqual(
                 recovered.expected_worker_parent_invocation_id,

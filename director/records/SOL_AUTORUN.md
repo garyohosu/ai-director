@@ -171,8 +171,45 @@
 
 ### コミットID
 
-- ai-director: 試行1修正コミットとして作成する。
+- ai-director: `bd9db8e` (`fix: recover delegated resume invocations`)
 
 ### 残課題
 
-- 独立再レビュー完了後、クリーンな実行状態でREAL04-R2を実行する。
+- 試行1の再開相関不具合は解消。REAL04-R2で実AI経路を再確認する。
+
+### 試行2（REAL04-R2）
+
+- 実行: 2026-08-01 15:35–15:45 JST
+  （`JOB-20260801T063515Z-REAL04-R2`）。使用AIは試行1と同じ。
+- mail 1起点、mail 3初回Claude TASK、mail 6新規Q012、mail 7 Codex判断依頼、
+  mail 9 Codex回答、mail 10新DecisionのClaude再開TASK、mail 11旧Decisionの
+  独立`DELEGATED`結果まで正常に進み、R1のNO_REPLYは再発しなかった。
+- Q012はANSWEREDとなり、mail 13時点で成果物は25 ASCII bytes、BOM/末尾改行なし、
+  SHA-256 `0A69635949D802CA985B6B8C89F3834AB973642529AB40C171065FC34C5D92B0`だった。
+- ただしClaudeがmail 13を製品reporterを使わず、`message_type=RESULT`かつ
+  `task_eligible=false`で手組みした。Orchestratorは制御通知契約どおりこれを
+  `IGNORED_CONTROL_NOTIFICATION`として除外し、Director最終検証は起動されなかった。
+  正しい成果物があっても完全自動ループ未完了のため、試行2も成功扱いにしない。
+
+### 試行2の原因と修正
+
+- 初回/再開TASKはACKと終端結果を要求していたが、`director/agent_reply.py`を使う
+  具体的コマンドと、終端`task_eligible=true`契約を本文へ含めていなかった。
+- Director製品関数へ必須reply protocolを集約し、初回TASKと再開TASKの双方へ、
+  `agent_reply.py ack|wait|complete|fail`の正確なコマンド、直接mail API/手組みJSONの禁止、
+  COMPLETEDの`artifacts=[{path, sha256}]`形式を付与した。
+- 各Job/Decision専用の具体的result fileパス、placeholderのない実行コマンド、
+  complete/wait/failの最小JSON例、reporter終了コード0の完了条件も付与した。
+- `task_eligible=false`の除外はPhase 3の安全要件なので弱めない。
+- 既知の制限として、現方式はLLMへの必須指示であり、Orchestrator側の信頼済みpostflight
+  brokerによる強制ではない。R3で同じ逸脱が再発する場合はprompt追加ではなく、AIには
+  result fileだけを書かせてtrusted brokerがreporterを実行する方式を実装する。
+
+### 変更ファイル
+
+- `director/director.py`, `director/tests/test_minimal_loop.py`,
+  `director/SPEC.md`, 本記録。
+
+### 残課題
+
+- 独立レビューと全テスト後、クリーンな実行状態でREAL04-R3を実行する。
