@@ -262,6 +262,8 @@ directorが判断・復帰操作の入出力として扱うのは、`mail`パッ
 
 `decision_id`は6章のDecision-IDと同一の値を使用する（指揮AIが提案し、directorが採番規則を検証する、または指揮AIは`decision_type`と`reason`のみ返しdirectorが受信後にDecision-IDを採番する、のいずれかとする。採否は実装時に確定する）。
 
+実装上の`confidence`は、`"HIGH"`、`"MEDIUM"`、`"LOW"`の列挙値に加えて、上記例のような有限のJSON数値`0.0`以上`1.0`以下を受理する。数値は`0.85`以上を`HIGH`、`0.7`以上`0.85`未満を`MEDIUM`、`0.7`未満を`LOW`へ正規化する。真偽値、範囲外、NaN、Infinityは拒否し、正規化後が`LOW`なら`requires_human`を`true`にしなければならない。
+
 ## 11. QandA.md の運用仕様
 
 - **質問フォーマット**:

@@ -213,3 +213,39 @@
 ### 残課題
 
 - 独立レビューと全テスト後、クリーンな実行状態でREAL04-R3を実行する。
+
+### 試行3（REAL04-R3）
+
+- 実行: 2026-08-01 15:56–16:04 JST
+  （`JOB-20260801T065634Z-REAL04-R3`）。使用AIは試行1と同じ。
+- mail 1起点、mail 3初回Claude TASK、mail 6新規Q013、mail 7の製品reporterによる
+  `WAITING`、mail 8 Codex判断依頼、mail 10 Codex回答まで進んだ。R2で修正した
+  構造化reply protocolは実AIが使用し、制御通知への誤分類は再発しなかった。
+- Codex回答mail 10はJob/Decision/Invocation系譜、action=`ANSWER`、
+  invocation_result=`COMPLETED`の全てが一致していたが、`confidence: 1.0`を含んだ。
+  仕様書の数値例・閾値と異なり製品parserは文字列列挙値だけを受理していたため、
+  mail 12を`HUMAN_REQUIRED`、mail 13を起点Invocationの`FAILED`として終了した。
+- 完全自動ループ未完了のため試行3も成功扱いにしない。証跡は
+  `director/records/_real04_runtime_20260801_R3`へ保存した。
+
+### 試行3の原因と修正
+
+- `director/SPEC.md`はJSON例に数値`0.95`、人間転送条件に`confidence < 0.7`を
+  記載していたが、`parse_decision`は`HIGH|MEDIUM|LOW`だけを受理していた。
+- 列挙値との後方互換性を維持しつつ、有限の`0.0..1.0`を受理して
+  `>=0.85`をHIGH、`>=0.7`をMEDIUM、それ未満をLOWへ正規化した。
+  bool、範囲外、NaN、Infinity、非スカラーは明示的に拒否する。
+- 判断依頼の`answer_json`を具体的な機械可読契約へ変更し、現在のJob-IDと
+  Decision-ID、許容confidence形式、LOW時の`requires_human=true`を明示した。
+
+### 変更ファイル
+
+- `director/decision.py`, `director/director.py`, `director/SPEC.md`,
+  `director/tests/test_minimal_loop.py`, 本記録。
+
+### 残課題
+
+- Director全60件、compileall、`git diff --check`に成功した。
+- 独立レビューはP0/P1なし、R4-ready判定。指摘された巨大整数の`float()`変換時の
+  `OverflowError`漏れも`DecisionError`へ正規化し、数値LOW閾値を依頼payloadへ追記した。
+- クリーンな実行状態でREAL04-R4を実行する。

@@ -1760,6 +1760,30 @@ class DirectorUnitTests(unittest.TestCase):
         with self.assertRaises(DecisionError):
             parse_decision(json.dumps(valid), expected_job_id="JOB-OTHER", expected_decision_id="DEC-TEST-001")
 
+    def test_decision_schema_normalizes_numeric_confidence(self) -> None:
+        valid = {"action": "ANSWER", "job_id": "JOB-TEST-001", "decision_id": "DEC-TEST-001", "confidence": 1.0, "reason": "r", "answer": "a", "target_agent": "claude_worker", "requires_human": False}
+
+        parsed = parse_decision(json.dumps(valid), expected_job_id=valid["job_id"], expected_decision_id=valid["decision_id"])
+        self.assertEqual(parsed.confidence, "HIGH")
+
+        valid["confidence"] = 0.7
+        parsed = parse_decision(json.dumps(valid), expected_job_id=valid["job_id"], expected_decision_id=valid["decision_id"])
+        self.assertEqual(parsed.confidence, "MEDIUM")
+
+        valid["confidence"] = 0.69
+        with self.assertRaisesRegex(DecisionError, "LOW confidence"):
+            parse_decision(json.dumps(valid), expected_job_id=valid["job_id"], expected_decision_id=valid["decision_id"])
+        valid["requires_human"] = True
+        parsed = parse_decision(json.dumps(valid), expected_job_id=valid["job_id"], expected_decision_id=valid["decision_id"])
+        self.assertEqual(parsed.confidence, "LOW")
+
+    def test_decision_schema_rejects_invalid_numeric_confidence(self) -> None:
+        valid = {"action": "ANSWER", "job_id": "JOB-TEST-001", "decision_id": "DEC-TEST-001", "confidence": 1.0, "reason": "r", "answer": "a", "target_agent": "claude_worker", "requires_human": False}
+        for invalid in (True, -0.1, 1.1, 10**400, float("nan"), float("inf"), float("-inf"), "CERTAIN", [], {}):
+            with self.subTest(confidence=invalid), self.assertRaisesRegex(DecisionError, "invalid confidence"):
+                valid["confidence"] = invalid
+                parse_decision(json.dumps(valid), expected_job_id=valid["job_id"], expected_decision_id=valid["decision_id"])
+
     def test_outbox_recovery_uses_find_mails_and_rejects_duplicates(self) -> None:
         mail = FakeMail()
         sender = mail.register_user("director")
@@ -1818,6 +1842,12 @@ class DirectorUnitTests(unittest.TestCase):
             mail.send_mail(worker, engine.uid, "[JOB-WAIT-001] [DEC-WAIT-001] STATUS: WAITING_FOR_DECISION", json.dumps(wait_body))
             engine.process_once()
             self.assertEqual(engine.jobs.load("JOB-WAIT-001").state, JobState.DECISION_PENDING)
+            request = next(message for message in mail.messages if "DECISION_REQUEST" in message["subject"])
+            request_payload = json.loads(request["body"])
+            self.assertEqual(request_payload["answer_json"]["job_id"], "JOB-WAIT-001")
+            self.assertEqual(request_payload["answer_json"]["decision_id"], "DEC-WAIT-001")
+            self.assertIn("0.0 through 1.0", request_payload["answer_json"]["confidence"])
+            self.assertIn("below 0.7", request_payload["answer_json"]["requires_human"])
             decision = {"action": "ANSWER", "job_id": "JOB-WAIT-001", "decision_id": "DEC-WAIT-001", "confidence": "HIGH", "reason": "exact requirement", "answer": "yes", "target_agent": "claude_designer", "requires_human": False}
             mail.send_mail(commander, engine.uid, "[JOB-WAIT-001] [DEC-WAIT-001] STATUS: ACK", json.dumps({"status": "ACK_RECEIVED"}))
             mail.send_mail(commander, engine.uid, "[JOB-WAIT-001] [DEC-WAIT-001] ANSWER", json.dumps(decision))

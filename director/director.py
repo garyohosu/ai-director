@@ -843,7 +843,16 @@ class DirectorEngine:
             **self._invocation_metadata(record),
             "context_packet": packet, "question": question,
             "allowed_actions": ["ANSWER", "CONTINUE", "REVISE", "DELEGATE", "COMPLETE", "HUMAN_REQUIRED", "REJECT"],
-            "answer_json": "{action, job_id, decision_id, confidence, reason, answer, target_agent, requires_human}",
+            "answer_json": {
+                "action": "one of ANSWER, CONTINUE, REVISE, DELEGATE, COMPLETE, HUMAN_REQUIRED, REJECT",
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                "confidence": "HIGH|MEDIUM|LOW or a finite number from 0.0 through 1.0",
+                "reason": "string",
+                "answer": "string",
+                "target_agent": "string",
+                "requires_human": "boolean; required true for LOW or numeric confidence below 0.7",
+            },
             "required": "ACK and terminal notification are mandatory.",
         }, ensure_ascii=False)
         result_mail_uid = self._send(
