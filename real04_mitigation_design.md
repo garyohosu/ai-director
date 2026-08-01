@@ -58,6 +58,15 @@
   永続化し、受信したparent/triggerをその発行済み関係と照合する。誤相関結果は
   Job状態を終端化せず、当該Director Invocationだけを失敗として隔離する。
 
+## フェーズ3: 制御通知による誤起動防止
+
+- Orchestratorの失敗通知本文は`message_type=SYSTEM_ALERT`、
+  `task_eligible=false`のJSON objectとする。
+- Orchestratorはこの構造化メタデータを起動前に判定し、AIを起動せずterminal indexへ
+  処理済みとして保存する。メールは未読のまま保持し、人間の確認を妨げない。
+- 件名の`NO_REPLY`等は補助表示に限定し、通常タスクの除外条件にしない。壊れたJSON、
+  メタデータ欠落、`task_eligible=true`は制御通知フィルタだけでは除外しない。
+
 ---
 
 ## 3. インターフェースとデータ構造

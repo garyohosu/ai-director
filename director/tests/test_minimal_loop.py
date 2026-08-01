@@ -101,6 +101,122 @@ class DirectorUnitTests(unittest.TestCase):
         self.assertEqual(DirectorState.DECISION_PENDING, "DECISION_PENDING")
         self.assertEqual(InvocationResult.DELEGATED, "DELEGATED")
 
+    def test_unknown_control_notifications_do_not_create_jobs_or_replies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+            orchestrator = mail.register_user("orchestrator")
+            first_id = mail.send_mail(
+                orchestrator,
+                engine.uid,
+                "[JOB-UNKNOWN-ALERT][NO_REPLY] display only",
+                json.dumps(
+                    {
+                        "message_type": "SYSTEM_ALERT",
+                        "task_eligible": False,
+                        "job_id": "JOB-UNKNOWN-ALERT",
+                    }
+                ),
+            )
+            second_id = mail.send_mail(
+                orchestrator,
+                engine.uid,
+                "ordinary display",
+                json.dumps(
+                    {
+                        "message_type": "INVOCATION_ACK",
+                        "task_eligible": False,
+                        "job_id": "JOB-UNKNOWN-ACK",
+                    }
+                ),
+            )
+
+            self.assertEqual(engine.process_once(), 2)
+            self.assertEqual(engine.jobs.list_records(), [])
+            self.assertEqual([m["mail_id"] for m in mail.messages], [first_id, second_id])
+            self.assertTrue(all(m["is_read"] for m in mail.messages))
+
+    def test_control_notification_is_idempotent_for_existing_and_terminal_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+            human = engine.uids["human"]
+            mail.send_mail(
+                human,
+                engine.uid,
+                "[JOB-CONTROL-001] [DEC-CONTROL-001] task",
+                "normal task",
+            )
+            engine.process_once()
+            record = engine.jobs.load("JOB-CONTROL-001")
+            original_state = record.state
+            original_mail_count = len(mail.messages)
+            orchestrator = mail.register_user("orchestrator")
+            alert_id = mail.send_mail(
+                orchestrator,
+                engine.uid,
+                "[JOB-CONTROL-001][TIMEOUT] display only",
+                json.dumps(
+                    {
+                        "message_type": "SYSTEM_ALERT",
+                        "task_eligible": False,
+                        "job_id": "JOB-CONTROL-001",
+                    }
+                ),
+            )
+            alert = mail.messages[-1]
+
+            engine.process_once()
+            engine._process(alert)
+            record = engine.jobs.load("JOB-CONTROL-001")
+            self.assertEqual(record.state, original_state)
+            self.assertEqual(record.handled_mail_ids.count(alert_id), 1)
+            self.assertEqual(len(mail.messages), original_mail_count + 1)
+
+            record.state = JobState.COMPLETED
+            engine.jobs.save(record)
+            late_id = mail.send_mail(
+                orchestrator,
+                engine.uid,
+                "[JOB-CONTROL-001][NO_REPLY] late display",
+                json.dumps(
+                    {
+                        "message_type": "SYSTEM_ALERT",
+                        "task_eligible": False,
+                        "job_id": "JOB-CONTROL-001",
+                    }
+                ),
+            )
+            engine.process_once()
+            terminal = engine.jobs.load("JOB-CONTROL-001")
+            self.assertEqual(terminal.state, JobState.COMPLETED)
+            self.assertIn(late_id, terminal.handled_mail_ids)
+
+    def test_no_reply_subject_and_broken_json_do_not_hide_normal_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+            human = engine.uids["human"]
+            mail.send_mail(
+                human,
+                engine.uid,
+                "[JOB-NORMAL-ALERT-TEXT] [DEC-NORMAL-ALERT-TEXT] [NO_REPLY] real task",
+                "{broken-json",
+            )
+
+            self.assertEqual(engine.process_once(), 1)
+            self.assertEqual(
+                engine.jobs.load("JOB-NORMAL-ALERT-TEXT").state,
+                JobState.WAITING_FOR_WORKER,
+            )
+            self.assertEqual(len(mail.messages), 4)
+
     def test_director_delegate_waits_with_invocation_bound_terminal_mail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

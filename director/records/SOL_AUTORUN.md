@@ -80,7 +80,9 @@
 
 ### コミットID
 
-- コミット作成後に追記する。
+- ai-director: `c3a51a9` (`feat: correlate delegated invocation results`)
+- ai-orchestrator: `077209a` (`feat: complete delegated invocation results`)
+- aiagent-mail: `13c7e99` (`feat: receive one exact mail atomically`)
 
 ### 残課題
 
@@ -88,7 +90,46 @@
 
 ## フェーズ3: 制御通知による誤起動防止
 
-- 未着手。初期レビューではmail DBスキーマ変更を避け、メール本文JSONメタデータとorchestratorの永続処理記録で実現する案が最小と判断。
+### 調査結果・判断理由
+
+- mail DBスキーマは変更せず、通知本文JSONの`message_type=SYSTEM_ALERT`と
+  `task_eligible=false`を正本にした。Subjectの`NO_REPLY`等は表示用途だけにした。
+- Orchestratorは起動候補を選ぶ前に制御通知をterminal indexへ永続記録し、CLIを
+  起動しない。メールは未読のままなので、人間または宛先AIが後から確認できる。
+- Directorにも防御的フィルタを置いた。独立レビューで、未知Jobの通知に対して
+  Job作成を先に行うと`Decision-ID missing`または不要な`DISCOVERED`作成になる問題を
+  再現したため、Job作成前の無状態な無視へ修正した。
+- 構造化通知へstdout/stderr末尾を載せるため、JSONエスケープ後のサイズを上限内に
+  収め、一般的な`*_TOKEN/*_SECRET*/*_PASSWORD/*_COOKIE/*_API_KEY`代入値も
+  StreamCaptureでマスクするよう補強した。
+
+### 変更ファイル
+
+- director: `director/director.py`, `director/tests/test_minimal_loop.py`,
+  `director/SPEC.md`, `real04_mitigation_design.md`, 本記録。
+- orchestrator: `orchestrator/dispatch.py`, `output_capture.py`, `SPEC.md`,
+  `TESTCASE.md`, `tests/test_dispatch.py`, `tests/test_output_capture.py`。
+- mail: 変更なし。
+
+### テスト結果
+
+- director: 51件成功。
+- orchestrator: 165件成功。
+- mail: 61件成功（変更なしの基準確認）。
+- SYSTEM_ALERTの未読維持・非起動・再巡回抑止、`task_eligible=false`単独、
+  壊れたJSON/メタデータ欠落/trueの通常処理、件名`NO_REPLY`の誤除外防止、
+  未知/既存/終端Director Job、JSONサイズ、秘密値マスクを確認した。
+- 独立レビューで、Directorの判定順、テストケースID重複、JSONエスケープ後の
+  サイズ、shell/JSON形式の資格情報漏えい、1MB出力時の正規表現性能を追加修正した。
+
+### コミットID
+
+- ai-orchestrator: `692fa7e` (`fix: prevent control notifications from launching agents`)
+- ai-director: この記録を含むフェーズ3コミットとして作成する。
+
+### 残課題
+
+- フェーズ3としてなし。REAL04実AI試験をフェーズ4で実施する。
 
 ## フェーズ4: REAL04再実行
 

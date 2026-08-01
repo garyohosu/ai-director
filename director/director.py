@@ -332,6 +332,49 @@ class DirectorEngine:
         }
         return json.dumps(fields, sort_keys=True, separators=(",", ":"))
 
+    @staticmethod
+    def _control_payload(message: dict) -> dict[str, object] | None:
+        try:
+            payload = json.loads(message.get("body", ""))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("message_type") == "SYSTEM_ALERT":
+            return payload
+        if payload.get("task_eligible") is False:
+            return payload
+        return None
+
+    def _ignore_control_notification(
+        self, message: dict, payload: dict[str, object]
+    ) -> JobRecord | None:
+        """Record a control mail without creating or transitioning a Job."""
+
+        record = None
+        job_id = payload.get("job_id")
+        if isinstance(job_id, str):
+            try:
+                validate_job_id(job_id)
+            except StateError:
+                job_id = None
+            else:
+                record = self.jobs.load(job_id)
+        mail_id = int(message["mail_id"])
+        duplicate = bool(record and mail_id in record.handled_mail_ids)
+        if record is not None and not duplicate:
+            record.handled_mail_ids.append(mail_id)
+            self.jobs.save(record)
+        self._log(
+            "control_notification_ignored",
+            job_id=job_id,
+            mail_id=mail_id,
+            message_type=payload.get("message_type"),
+            known_job=record is not None,
+            duplicate=duplicate,
+        )
+        return record
+
     def _ack(self, record: JobRecord, recipient: str) -> None:
         ack_decision = f"{record.decision_id}-ACK"
         subject = f"[{record.job_id}] [{ack_decision}] [{self.invocation_id}] STATUS: ACK"
@@ -707,7 +750,11 @@ class DirectorEngine:
         self.jobs.save(record)
         return record
 
-    def _process(self, message: dict) -> JobRecord:
+    def _process(self, message: dict) -> JobRecord | None:
+        control_payload = self._control_payload(message)
+        if control_payload is not None:
+            return self._ignore_control_notification(message, control_payload)
+
         record = self._create_record(message)
         if message["mail_id"] in record.handled_mail_ids:
             rejected_reason = record.rejected_mail_reasons.get(

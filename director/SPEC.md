@@ -382,3 +382,5 @@ directorが参照する正式仕様（本SPEC.md、mail/SPEC.md、orchestrator/S
 - 誤ったInvocation相関のメールは現在のDirectorStateを変更せず、そのDirector
   Invocationだけを`FAILED`として終了する。拒否したメールIDと理由を保存し、同じ
   triggerの再試行でも`COMPLETED`へ反転させず`FAILED`を再現する。
+- `message_type=SYSTEM_ALERT`または`task_eligible=false`の本文JSONは制御通知として
+  扱い、誤ってDirectorが起動された場合もJobを委任・再開しない。
