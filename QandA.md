@@ -1,7 +1,6 @@
-﻿# QandA.md
+# QandA.md
 
 ## Q001
-
 - Status: ANSWERED
 - Request-ID: REQ-20260731-SPEC
 - From: AntiGravity
@@ -18,7 +17,6 @@
 - Answered-At: 2026-07-31T03:04:17.000Z
 
 ## Q002
-
 - Status: ANSWERED
 - Request-ID: REQ-20260731-SPEC
 - From: AntiGravity
@@ -35,7 +33,6 @@
 - Answered-At: 2026-07-31T03:04:17.000Z
 
 ## Q003
-
 - Status: ANSWERED
 - Request-ID: REQ-20260731-SPEC
 - From: AntiGravity
@@ -52,7 +49,6 @@
 - Answered-At: 2026-07-31T03:04:17.000Z
 
 ## Q004
-
 - Status: ANSWERED
 - Request-ID: DIRECTOR-SPEC-001
 - From: claude_designer
@@ -69,7 +65,6 @@
 - Answered-At: 2026-07-31T12:28:55Z
 
 ## Q005
-
 - Status: ANSWERED
 - Request-ID: DIRECTOR-SPEC-001
 - From: claude_designer
@@ -84,3 +79,147 @@
 - Decision: 承認する。orchestratorへdirector用CLIアダプターおよび設定を追加してよい。既存のmail/orchestrator公開仕様を壊さず、directorは可変UIDで通常登録する。起動・タイムアウト管理はorchestrator、判断・委任はdirectorが担う。
 - Reason: 人間からの指示に基づき、 orchestratorでの統合運用を正式許可するため。
 - Answered-At: 2026-07-31T12:28:55Z
+
+## Q006
+- Status: ANSWERED
+- Request-ID: JOB-20260731T132500Z-REAL01
+- Decision-ID: DEC-20260731T132500Z-01-C0DE
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物ファイルは末尾改行なしの一行で作成してよいですか？
+- Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
+- Evidence: この試験依頼
+- Answered-By: human_controller
+- Decision: 成果物ファイルは、指定された文字列の一行を末尾改行なしで作成する。
+- Reason: 実AI試験では成果物のバイト列とSHA-256を完全一致で検証するため。
+- Answered-At: 2026-07-31T04:57:29Z
+
+## Q007
+- Status: ANSWERED
+- Request-ID: JOB-20260731T141500Z-REAL02
+- Decision-ID: DEC-20260731T141500Z-01-BEEF
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物は指定文字列の一行を末尾改行なしで作成してよいですか？
+- Proposed-Answer: はい。指定文字列を末尾改行なしで作成する。
+- Evidence: 新規DBの実AI試験依頼
+- Answered-By: director
+- Decision: 成果物は、指定された文字列の一行を末尾改行なしで作成する。
+- Reason: 同一内容のQ006に対する確定済み回答を再利用した。
+- Reused-From: Q006
+- Answered-At: 2026-07-31T05:39:39Z
+
+## Q009
+- Status: ANSWERED
+- Request-ID: DIAG-20260731T-REAL03-INVOCATION
+- Decision-ID: DEC-DIAG-REAL03-01
+- From: director_diagnostic
+- To: human_controller
+- Severity: HIGH
+- Blocking: YES
+- Category: PROTOCOL
+- Question: director Python CLIをorchestratorの一つのInvocationとして起動した場合、処理済みを示すInvocation-ID付き終端通知をdirectorが送信する契約にするか、orchestratorがdirector専用のstdout成功契約を検証するか？
+- Proposed-Answer: 人間が正式な通信契約と通知先を確定する。
+- Evidence: REAL03ではdirectorがACKと委任メールを送信したが、Invocation-ID付きのWAITING_FOR_DECISION/COMPLETED/FAILED通知がなく、orchestratorがNO_REPLYと分類した。director起動に関する修正は行っていない。
+- Answered-By: human_controller
+- Decision: directorも他のエージェントと同様に、Invocation-ID付きのメールで起動単位の終了状態を通知する。stdoutおよび終了コード0だけではInvocation成功と判定しない。directorがworkerへ委任して自身の処理を終了する場合は、WAITING_FOR_WORKERを送信する。
+- Reason: 全エージェントでInvocation終了契約を統一し、NO_REPLY判定、再起動、状態復旧、将来のチャネル差し替えを一貫して扱うため。
+- Answered-At: 2026-07-31T07:00:00Z
+
+## Q010
+- Status: OPEN
+- Request-ID: JOB-20260731T072152Z-REAL04
+- Decision-ID: DEC-20260731T072152Z-01-9A21
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物の文字コードはUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにしますか?
+- Proposed-Answer: UTF-8(BOMなし)を推奨する。
+- Evidence: JOB-20260731T072152Z-REAL04のDELEGATEメール(依頼書は成果物の文字コードを指定していない)
+
+## Q011
+- Status: ANSWERED
+- Request-ID: JOB-20260801T053600Z-REAL04-R1
+- Decision-ID: DEC-20260801T053600Z-01-A404
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 成果物 director/tests/artifacts/real04_result.txt の文字コードはUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにしますか?
+- Proposed-Answer: UTF-8(BOMなし)を推奨する。BOMの有無で先頭3バイトが変わり、検証対象のSHA-256が別値になるため。
+- Evidence: 本JobのDELEGATEメール(mail_id=3)の依頼書に文字コードの指定がない。前JobのQ010は別Request-ID(JOB-20260731T072152Z-REAL04)のためOPENのまま再利用せず、本Job用に新規採番した。
+- Answered-By: director
+- Decision: UTF-8（BOMなし）とする。
+- Reason: 指定内容はASCII文字列そのものであり、BOMを付けると先頭3バイトが追加されて検証対象のSHA-256も変わるため。既存Q010および本JobのQ011の提案とも整合する。
+- Answered-At: 2026-08-01T05:47:39Z
+
+## Q012
+- Status: ANSWERED
+- Request-ID: JOB-20260801T063515Z-REAL04-R2
+- Decision-ID: DEC-20260801T063515Z-01-R204
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 本R2受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにするか、(b)末尾改行を付けないことを確定してよいか、(c)結果として全体バイト長を厳密に25バイトとしてよいか、の3点の確定回答をください。
+- Proposed-Answer: (a)UTF-8(BOMなし)、(b)末尾改行なし、(c)全体25バイト、を推奨する。BOMを付けると先頭に3バイト、末尾改行を付けるとCRLF/LFで1〜2バイトが追加され、いずれも合計バイト長と検証対象のSHA-256が別値になるため。
+- Evidence: 本JobのDELEGATEメール(mail_id=3)の依頼書。依頼書本文にはUTF-8(BOMなし)・末尾改行なし・25バイトの記載があるが、成果物作成前に本Job(JOB-20260801T063515Z-REAL04-R2)固有のBlocking判断として確定を求める。Q006・Q010・Q011は別Request-IDのため再利用せず、本Job用にQ012を新規採番した。
+- Answered-By: director
+- Decision: (a) Use UTF-8 without BOM. (b) Do not append a trailing newline. (c) The complete file length must be exactly 25 bytes.
+- Reason: The required artifact is the exact 25-byte ASCII sequence REAL04_AUTONOMOUS_LOOP_OK; a BOM or trailing newline would add bytes and change the digest.
+- Answered-At: 2026-08-01T06:43:47Z
+
+## Q013
+- Status: OPEN
+- Request-ID: JOB-20260801T065634Z-REAL04-R3
+- Decision-ID: DEC-20260801T065634Z-01-R304
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 本R3受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにするか、(b)末尾改行を付けないことを確定してよいか、(c)結果として全体バイト長を厳密に25バイトとしてよいか、の3点の確定回答をください。
+- Proposed-Answer: (a)UTF-8(BOMなし)、(b)末尾改行なし、(c)全体25バイト、を推奨する。BOMを付けると先頭に3バイト、末尾改行を付けるとCRLF/LFで1〜2バイトが追加され、いずれも合計バイト長と検証対象のSHA-256が別値になるため。
+- Evidence: 本JobのDELEGATEメール(mail_id=3)の依頼書。依頼書本文にはUTF-8(BOMなし)・末尾改行なし・25バイトの記載があるが、成果物作成前に本Job(JOB-20260801T065634Z-REAL04-R3)固有のBlocking判断として確定を求める。Q006・Q010・Q011・Q012は別Request-IDのため再利用せず、それらの回答を本件の充足とみなさず、本Job用にQ013を新規採番した。
+
+## Q014
+- Status: OPEN
+- Request-ID: JOB-20260801T071255Z-REAL04-R4
+- Decision-ID: DEC-20260801T071255Z-01-R404
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 本R4受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)で確定してよいか、(b)末尾改行を付けないことで確定してよいか、(c)結果として全体バイト長を厳密に25バイトとしてよいか、の3点の確定回答をdirectorへ求めます。
+- Proposed-Answer: (a)UTF-8(BOMなし)、(b)末尾改行なし、(c)全体25バイト、を推奨する。BOMを付けると先頭に3バイト、末尾改行を付けるとCRLF/LFで1〜2バイトが追加され、いずれも合計バイト長と検証対象のSHA-256が別値になるため。
+- Evidence: 本Job(JOB-20260801T071255Z-REAL04-R4)のDELEGATEメール(mail_id=3)の依頼書。依頼書本文にはUTF-8(BOMなし)・末尾改行なし・25バイトの記載があるが、成果物作成前に本Job固有のBlocking判断として確定を求める。Q006・Q010・Q011・Q012・Q013はいずれも別Request-IDのため再利用せず、それらの回答を本件の充足とみなさず、本Job用にQ014を新規採番した。
+- Superseded-By: Q015 (JOB-20260801T085449Z-REAL04-R5)
+- Resolution-Note: R4はCodex CLI利用上限によりQ014未回答のまま終了した。同一論点は後継試験REAL04-R5のQ015で解決し、REAL04-R5は正常完了した。
+
+## Q015
+- Status: ANSWERED
+- Request-ID: JOB-20260801T085449Z-REAL04-R5
+- Decision-ID: DEC-20260801T085449Z-01-R405
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 本R5受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)で確定してよいか、(b)末尾改行を付けないことで確定してよいか、(c)結果として全体バイト長を厳密に25バイト(ASCII文字列 REAL04_AUTONOMOUS_LOOP_OK)としてよいか、の3点の確定回答をdirectorへ求めます。
+- Proposed-Answer: (a)UTF-8(BOMなし)、(b)末尾改行なし、(c)全体25バイト、を推奨する。BOMを付けると先頭に3バイト、末尾改行を付けるとCRLF/LFで1〜2バイトが追加され、いずれも合計バイト長と検証対象のSHA-256が別値になるため。
+- Evidence: 本Job(JOB-20260801T085449Z-REAL04-R5)のDELEGATEメール(mail_id=3)の依頼書。依頼書本文にはUTF-8(BOMなし)・末尾改行なし・25バイトの記載があるが、成果物作成前に本Job固有のBlocking判断として確定を求める。Q006・Q010・Q011・Q012・Q013・Q014はいずれも別Request-IDのため再利用せず、それらの回答を本件の充足とみなさず、本Job用にQ015を新規採番した。
+- Answered-By: director
+- Decision: Confirmed: create director/tests/artifacts/real04_result.txt as UTF-8 without BOM, with no trailing newline, containing exactly the 25 ASCII bytes REAL04_AUTONOMOUS_LOOP_OK.
+- Reason: The requested acceptance artifact is an ASCII string of exactly 25 bytes. UTF-8 without BOM preserves those 25 bytes, while a BOM or trailing newline would add bytes and violate the exact-length requirement.
+- Answered-At: 2026-08-01T09:05:55Z

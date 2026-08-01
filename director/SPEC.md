@@ -12,6 +12,10 @@ director は、複数のAIエージェント（Claude Code、Codex CLIなど）�
 
 director自身は作業AI・指揮AIいずれのCLIプロセスも直接起動しない。すべてのAI起動はorchestratorへ委ね、directorとorchestrator・作業AI・指揮AIとの間の情報伝達はmail経由のメッセージ交換に統一する（2章）。
 
+## 1.1 Knowledge Index
+
+`director/knowledge/` は標準Markdownだけで構成する短い索引である。正式情報の優先順位は、人間の最新指示、`QandA.md`のANSWERED、`SPEC.md`、`COMPONENTS.md`、Job状態とcheckpoint、Knowledge Index、mail履歴、AIの提案とする。Knowledge Indexが正式仕様と矛盾する場合は`QandA.md`と`SPEC.md`を優先する。各ページは生成時刻、source commit、参照元ファイル、SHA-256を持ち、LLMなしのPython生成を許可する。Context Packetには判断に必要なページだけを含める。
+
 ## 2. 責務の分離とシステム境界
 
 | コンポーネント | 主要責務 | 境界・制約 |
@@ -44,7 +48,7 @@ director が mail 宛に指示メールを送信すると、orchestrator が未�
 
 orchestrator/SPEC.md 30章「返信メールの確認」は、CLIを起動したAIが元メールの送信者（または本文が明示する返信先UID）へ返信することを前提に、返信がなければ`NO_REPLY`をログ・通知する。directorは複数エージェント間の仲介・転送を行うため、起動契機となった元メールの送信者と、判断結果に基づく次の指示の送信先が一致しないことが構造的に生じる。
 
-暫定方針（QandA.md Q004、人間の最終承認待ち）: directorは、起動契機となった元メールの送信者（本文に有効な返信先UIDの指定があればそのUID）へ、判断結果に基づく指示メールとは別に、短い受理通知（ACK。処理不要である旨を明記し、追加のAI起動を誘発しない文面とする）を必ず返信する。ACKの送信をもってorchestratorのreply-check（30章）を満たす。判断結果に基づく実際の指示メール・完了報告・HUMAN_REQUIRED要求は、Decision-ID単位で別途送信する（6章）。
+Q009の正式回答により、director自身も他エージェントと同じInvocation終端通知契約を使う。ACK・委任メール送信・`WAITING_FOR_WORKER`通知は同じJob-ID、Decision-ID、director Invocation-IDを保持する。stdoutや終了コード0だけではInvocation成功と判定しない。
 
 ## 3. 前提条件と実行環境
 
@@ -86,6 +90,13 @@ OUTBOX_PENDING    … 判断結果に基づく指示メールの送信を試み�
 SENT              … 送信を試みたメールが実際にmail DBへ記録されたことを確認した
 COMPLETED         … この依頼IDに対する一連の処理が完了した
 HUMAN_REQUIRED    … 自動処理を停止し、人間の判断を待っている
+
+WAITING_FOR_DECISION … 作業AIがBlocking質問を送信し、質問結果JSONとcheckpointを報告して終了した状態。Job全体は非終端だが、そのCLI起動単位は正常終了とする。同一CLIプロセス内で回答を待たない。
+WAITING_FOR_WORKER … directorがworkerへ委任メールを送信し、委任メールIDとcheckpointを保存したうえで、起動元へInvocation-ID付き通知を送信して終了した状態。Job全体は非終端で、workerの別Invocationを待つ。stdoutや終了コード0では代用できない。
+
+作業AIの質問手順は「QandA.mdへOPEN質問を追加 → 質問メール送信 → `agent_reply.py wait --result-file`でWAITING_FOR_DECISION送信 → checkpoint保存確認 → 終了コード0」とする。directorは質問とWAITING通知を受信した後、`DECISION_PENDING`へ進む。directorの委任手順は「起動元へACK → workerへ委任 → 委任メールIDをJob状態へ保存 → checkpoint保存 → 起動元へWAITING_FOR_WORKER → Invocation状態を永続化 → 終了コード0」とする。WAITING通知送信に失敗した場合、director Invocationは成功扱いにしない。
+
+orchestratorのCLIタイムアウト通知は`status: TIMED_OUT`、`job_id`、`decision_id`、`agent_uid`、`exit_code`、`timeout_sec`、`stdout_log`、`stderr_log`、`occurred_at`を含む構造化フィールドを持つ。質問メールとタイムアウト通知が併存する場合、質問成功へ補正せず、当該CLI実行をタイムアウトとして記録し、directorは原則`HUMAN_REQUIRED`へ遷移する。
 ```
 
 ### 状態遷移
@@ -98,7 +109,7 @@ OUTBOX_PENDING   -> HUMAN_REQUIRED   （Decision-IDの重複検出。6章）
 HUMAN_REQUIRED   -> DECISION_PENDING または OUTBOX_PENDING （人間の承認後。9章）
 ```
 
-各状態遷移は、遷移前にジャーナルへ書き込みを行ってから対応する操作（メール送信、指揮AIへの判断依頼など）を実行する。すなわち「状態を書いてから行動する」順序を守り、「行動してから状態を書く」順序にしない。
+各状態遷移は、遷移前にジャーナルへ書き込みを行ってから対応する操作（メール送信、指揮AIへの判断依頼など）を実行する。すなわち「状態を書いてから行動する」順序を守り、「行動してから状態を書く」順序にしない。委任メール送信に失敗した場合はWAITING_FOR_WORKERへ進まず、WAITING通知送信に失敗した場合はInvocation成功として扱わない。
 
 ### クラッシュ復旧
 
@@ -251,6 +262,8 @@ directorが判断・復帰操作の入出力として扱うのは、`mail`パッ
 
 `decision_id`は6章のDecision-IDと同一の値を使用する（指揮AIが提案し、directorが採番規則を検証する、または指揮AIは`decision_type`と`reason`のみ返しdirectorが受信後にDecision-IDを採番する、のいずれかとする。採否は実装時に確定する）。
 
+実装上の`confidence`は、`"HIGH"`、`"MEDIUM"`、`"LOW"`の列挙値に加えて、上記例のような有限のJSON数値`0.0`以上`1.0`以下を受理する。数値は`0.85`以上を`HIGH`、`0.7`以上`0.85`未満を`MEDIUM`、`0.7`未満を`LOW`へ正規化する。真偽値、範囲外、NaN、Infinityは拒否し、正規化後が`LOW`なら`requires_human`を`true`にしなければならない。
+
 ## 11. QandA.md の運用仕様
 
 - **質問フォーマット**:
@@ -348,3 +361,47 @@ directorが参照する正式仕様（本SPEC.md、mail/SPEC.md、orchestrator/S
 6. Codex CLI がレビュー結果を返信。
 7. 指摘があれば director が Claude Code へ REVISE 指示。
 8. APPROVED に達したら COMPLETE と判定して報告。
+
+## 18. Invocation の状態と関連付け
+
+- Director内部の進行状態 (`DirectorState`) と、一回のCLI起動結果
+  (`InvocationResult`) は別の値として管理する。
+- `InvocationResult` は `COMPLETED`、`DELEGATED`、`WAITING`、`FAILED`
+  のいずれかとする。別AIへ `DECISION_REQUEST` を送信できた起動は、元の
+  Invocationを `DELEGATED` として正常に終了する。
+- 起動と結果メールの関連付けは、本文JSONの `invocation_id`、
+  `parent_invocation_id`、`root_invocation_id`、`trigger_mail_uid` を正本とする。
+  件名や宛先は表示・配送用であり、Invocation終了判定の正本にしない。
+- `result_mail_uid` は送信後に確定した実メールIDを状態へ保存する。本文内に
+  自己参照値として埋め込まない。
+- `AI_TRIGGER_MAIL_UID` が指定された起動では、そのメールだけを受信・処理し、
+  同じ受信者の他の未読メールを消費しない。
+- worker/commanderへ発行した子タスクごとに、送信元Director Invocationと実際の
+  送信メールIDを期待する `parent_invocation_id` / `trigger_mail_uid` として保存する。
+  受信結果は起動環境との自己一致だけでなく、この発行済み関係とも一致しなければ
+  ならない。最初の有効結果で子Invocationを固定し、同一InvocationのQUESTIONと
+  WAITINGだけを同じ子処理として扱う。
+- 誤ったInvocation相関のメールは現在のDirectorStateを変更せず、そのDirector
+  Invocationだけを`FAILED`として終了する。拒否したメールIDと理由を保存し、同じ
+  triggerの再試行でも`COMPLETED`へ反転させず`FAILED`を再現する。
+- `message_type=SYSTEM_ALERT`または`task_eligible=false`の本文JSONは制御通知として
+  扱い、誤ってDirectorが起動された場合もJobを委任・再開しない。
+- commander回答からworkerを再開するときは、worker向けTASKに新しいDecision-IDを
+  割り当てる一方、そのDirector起動の終端`DELEGATED`は起点メールの旧Decision-IDで
+  別メールとして返信する。一通を子TASKと起点Invocation結果に兼用しない。
+- 再開処理は、旧/新Decision-ID、回答、送信元、起点Invocationのparent/root/triggerを
+  含むreplay intentを子TASK送信前に永続化する。子TASK送信後または終端結果送信時に
+  中断しても、Outboxとintentから同じ子メールを回収し、子TASKを重複発行せずに
+  起点Invocation結果を再送できなければならない。
+- 同一Invocation結果の遅延・重複メールは、現在の子タスクの相関ではなく、replay
+  intentに保存した不変の送信元/Invocation/parent/root/triggerで検証する。保存系譜と
+  一つでも異なるメールはreplayしない。
+- 互換モードで`AI_TRIGGER_MAIL_UID`がない場合も、実際に処理したメールIDを
+  `trigger_mail_uid`として保持し、0へ戻さない。
+- worker失敗で人間確認へ遷移する場合、人間向け通知とは別に、起動元へ構造化した
+  `InvocationResult=FAILED`を返信して当該Director Invocationを終端させる。
+- Directorがworkerへ送る初回TASKと再開TASKは、ACK/WAITING/COMPLETED/FAILEDを
+  `director/agent_reply.py`で送る必須コマンドを本文に含める。workerは終端メールを
+  手組みせず、製品reporterに`message_type=INVOCATION_RESULT`、`task_eligible=true`、
+  起動Invocation系譜を機械付与させる。`task_eligible=false`の手組み結果は制御通知として
+  除外されDirectorを起動しないため、正常完了として扱わない。
