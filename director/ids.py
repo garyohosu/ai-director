@@ -4,6 +4,7 @@ import re
 import secrets
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
@@ -15,6 +16,48 @@ DECISION_ID_RE = re.compile(
 
 class InvocationIdError(ValueError):
     """Raised when Invocation-ID environment metadata is unsafe or missing."""
+
+
+INVOCATION_ID_RE = re.compile(r"^(?:INV|MANUAL)-[A-Za-z0-9._-]+$")
+
+
+def validate_invocation_id(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not INVOCATION_ID_RE.fullmatch(value):
+        raise InvocationIdError(f"{field_name} must be a valid Invocation-ID")
+    return value
+
+
+@dataclass(frozen=True)
+class InvocationMetadata:
+    parent_invocation_id: str | None
+    root_invocation_id: str
+    trigger_mail_uid: int | None
+
+
+def resolve_invocation_metadata(
+    environment: Mapping[str, str], invocation_id: str
+) -> InvocationMetadata:
+    parent = environment.get("AI_PARENT_INVOCATION_ID")
+    if parent == "":
+        raise InvocationIdError("AI_PARENT_INVOCATION_ID is defined but empty")
+    if parent is not None:
+        parent = validate_invocation_id(parent, "AI_PARENT_INVOCATION_ID")
+    if "AI_ROOT_INVOCATION_ID" in environment:
+        root = validate_invocation_id(
+            environment.get("AI_ROOT_INVOCATION_ID"), "AI_ROOT_INVOCATION_ID"
+        )
+    else:
+        root = invocation_id
+    trigger_raw = environment.get("AI_TRIGGER_MAIL_UID")
+    trigger = None
+    if trigger_raw is not None:
+        try:
+            trigger = int(trigger_raw)
+        except (TypeError, ValueError) as err:
+            raise InvocationIdError("AI_TRIGGER_MAIL_UID must be an integer") from err
+        if trigger <= 0:
+            raise InvocationIdError("AI_TRIGGER_MAIL_UID must be positive")
+    return InvocationMetadata(parent, root, trigger)
 
 
 def new_manual_invocation_id() -> str:
@@ -40,9 +83,9 @@ def resolve_invocation_id(environment: Mapping[str, str]) -> str:
             "AI_INVOCATION_ID and INVOCATION_ID are both set but have different values"
         )
     if ai_present:
-        return str(ai_value)
+        return validate_invocation_id(ai_value, "AI_INVOCATION_ID")
     if legacy_present:
-        return str(legacy_value)
+        return validate_invocation_id(legacy_value, "INVOCATION_ID")
     if environment.get("AI_ALLOW_MISSING_INVOCATION_ID") == "1":
         return new_manual_invocation_id()
     raise InvocationIdError(

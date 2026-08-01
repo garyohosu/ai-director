@@ -9,9 +9,9 @@ import sys
 from pathlib import Path
 
 if __package__:
-    from .ids import InvocationIdError, resolve_invocation_id
+    from .ids import InvocationIdError, resolve_invocation_id, resolve_invocation_metadata
 else:
-    from ids import InvocationIdError, resolve_invocation_id
+    from ids import InvocationIdError, resolve_invocation_id, resolve_invocation_metadata
 
 _SECRET_MARKERS = (
     "api_key",
@@ -220,6 +220,7 @@ def main() -> int:
 
     try:
         final_inv_id = resolve_invocation_id(os.environ)
+        invocation_metadata = resolve_invocation_metadata(os.environ, final_inv_id)
     except InvocationIdError as err:
         print(f"ERROR: {err}", file=sys.stderr)
         return 1
@@ -253,6 +254,18 @@ def main() -> int:
                 print(
                     "ERROR: Specified Invocation-ID "
                     f"'{payload_invocation_id}' does not match environment '{final_inv_id}'",
+                    file=sys.stderr,
+                )
+                return 1
+        expected_lineage = {
+            "parent_invocation_id": invocation_metadata.parent_invocation_id,
+            "root_invocation_id": invocation_metadata.root_invocation_id,
+            "trigger_mail_uid": invocation_metadata.trigger_mail_uid,
+        }
+        for key, expected_value in expected_lineage.items():
+            if key in payload and payload[key] != expected_value:
+                print(
+                    f"ERROR: result {key} does not match launch metadata",
                     file=sys.stderr,
                 )
                 return 1
@@ -297,10 +310,15 @@ def main() -> int:
 
     if args.action == "ack":
         body_dict = {
+            "message_type": "INVOCATION_ACK",
+            "task_eligible": False,
             "status": "ACK_RECEIVED",
             "job_id": job_id,
             "decision_id": decision_id,
             "invocation_id": final_inv_id,
+            "parent_invocation_id": invocation_metadata.parent_invocation_id,
+            "root_invocation_id": invocation_metadata.root_invocation_id,
+            "trigger_mail_uid": invocation_metadata.trigger_mail_uid,
             "agent_uid": agent_uid,
             "message": "Task instruction accepted and processing started.",
         }
@@ -322,8 +340,14 @@ def main() -> int:
             print(f"ERROR validating wait result file: {err}", file=sys.stderr)
             return 1
         payload["agent_uid"] = agent_uid
+        payload["message_type"] = "INVOCATION_RESULT"
+        payload["task_eligible"] = True
         payload["decision_id"] = decision_id
         payload["invocation_id"] = final_inv_id
+        payload["parent_invocation_id"] = invocation_metadata.parent_invocation_id
+        payload["root_invocation_id"] = invocation_metadata.root_invocation_id
+        payload["trigger_mail_uid"] = invocation_metadata.trigger_mail_uid
+        payload["invocation_result"] = "WAITING"
         body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
         mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
         state_file.write_text(json.dumps({"status": "WAITING_FOR_DECISION", "updated_at": subject}), encoding="utf-8")
@@ -337,7 +361,15 @@ def main() -> int:
     payload["job_id"] = job_id
     payload["decision_id"] = decision_id
     payload["agent_uid"] = agent_uid
+    payload["message_type"] = "INVOCATION_RESULT"
+    payload["task_eligible"] = True
     payload["invocation_id"] = final_inv_id
+    payload["parent_invocation_id"] = invocation_metadata.parent_invocation_id
+    payload["root_invocation_id"] = invocation_metadata.root_invocation_id
+    payload["trigger_mail_uid"] = invocation_metadata.trigger_mail_uid
+    payload["invocation_result"] = (
+        "COMPLETED" if args.action == "complete" else "FAILED"
+    )
 
     body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
     mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)

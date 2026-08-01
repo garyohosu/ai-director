@@ -16,16 +16,18 @@ try:
     from .context_packet import ContextPacketBuilder
     from .knowledge import KnowledgeIndex
     from .decision import DecisionError, parse_decision
+    from .ids import InvocationIdError, resolve_invocation_id, resolve_invocation_metadata
     from .outbox import Outbox, OutboxEntry, OutboxError
     from .qanda import QandaError, answer_question, find_answered_reuse, find_open_blocking, normalized_reuse_signature, parse_qanda
-    from .state_machine import JobRecord, JobState, JobStore, StateError, utc_now, validate_job_id
+    from .state_machine import InvocationResult, JobRecord, JobState, JobStore, StateError, TERMINAL_STATES, utc_now, validate_job_id
 except ImportError:  # direct ``py director/director.py`` compatibility
     from context_packet import ContextPacketBuilder
     from knowledge import KnowledgeIndex
     from decision import DecisionError, parse_decision
+    from ids import InvocationIdError, resolve_invocation_id, resolve_invocation_metadata
     from outbox import Outbox, OutboxEntry, OutboxError
     from qanda import QandaError, answer_question, find_answered_reuse, find_open_blocking, normalized_reuse_signature, parse_qanda
-    from state_machine import JobRecord, JobState, JobStore, StateError, utc_now, validate_job_id
+    from state_machine import InvocationResult, JobRecord, JobState, JobStore, StateError, TERMINAL_STATES, utc_now, validate_job_id
 
 JOB_RE = re.compile(r"\[(JOB-[A-Za-z0-9._-]+)\]")
 DEC_RE = re.compile(r"\[(DEC-[A-Za-z0-9._-]+)\]")
@@ -74,7 +76,16 @@ class DirectorEngine:
         self.qanda_path = self.root / "QandA.md"
         self.pending_path = self.runtime / "pending.json"
         self.uid = self._register_and_persist()
-        self.invocation_id = os.environ.get("INVOCATION_ID", "")
+        try:
+            self.invocation_id = resolve_invocation_id(os.environ)
+            invocation_metadata = resolve_invocation_metadata(
+                os.environ, self.invocation_id
+            )
+        except InvocationIdError as err:
+            raise DirectorError(str(err)) from err
+        self.parent_invocation_id = invocation_metadata.parent_invocation_id
+        self.root_invocation_id = invocation_metadata.root_invocation_id
+        self.trigger_mail_uid = invocation_metadata.trigger_mail_uid
         self.uids = self._register_names()
         self.log_path = self.root / "director" / "logs" / "director.jsonl"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,10 +130,226 @@ class DirectorEngine:
         self._log("mail_sent", job_id=record.job_id, decision_id=decision_id, mail_id=sent.mail_id, recipient_uid=recipient)
         return int(sent.mail_id or 0)
 
+    def _invocation_metadata(self) -> dict[str, object]:
+        return {
+            "invocation_id": self.invocation_id,
+            "parent_invocation_id": self.parent_invocation_id,
+            "root_invocation_id": self.root_invocation_id,
+            "trigger_mail_uid": self.trigger_mail_uid,
+        }
+
+    def _complete_noop(
+        self, record: JobRecord, message: dict, reason: str
+    ) -> JobRecord:
+        """Emit a terminal result for a trigger needing no state transition."""
+
+        payload = {
+            "message_type": "INVOCATION_RESULT",
+            "task_eligible": False,
+            "status": "COMPLETED",
+            "director_state": record.state,
+            "invocation_result": InvocationResult.COMPLETED,
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            **self._invocation_metadata(),
+            "reason": reason,
+        }
+        result_decision_id = (
+            f"{record.decision_id}-RESULT-{int(message['mail_id'])}-{self.invocation_id}"
+        )
+        record.result_mail_uid = self._send(
+            record,
+            message["sender_uid"],
+            result_decision_id,
+            f"[{record.job_id}] [{record.decision_id}] [{result_decision_id}] [{self.invocation_id}] STATUS: COMPLETED",
+            json.dumps(payload, ensure_ascii=False),
+        )
+        record.latest_invocation_id = self.invocation_id
+        record.latest_invocation_result = InvocationResult.COMPLETED
+        self.jobs.save(record)
+        return record
+
+    def _fail_invocation(
+        self, record: JobRecord, message: dict, reason: str
+    ) -> JobRecord:
+        """Fail only the current Director invocation and preserve workflow state."""
+
+        mail_key = str(int(message["mail_id"]))
+        reason = record.rejected_mail_reasons.setdefault(mail_key, reason)
+        payload = {
+            "message_type": "INVOCATION_RESULT",
+            "task_eligible": False,
+            "status": "FAILED",
+            "director_state": record.state,
+            "invocation_result": InvocationResult.FAILED,
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            **self._invocation_metadata(),
+            "reason": reason,
+        }
+        result_decision_id = (
+            f"{record.decision_id}-FAILED-{int(message['mail_id'])}-{self.invocation_id}"
+        )
+        record.result_mail_uid = self._send(
+            record,
+            message["sender_uid"],
+            result_decision_id,
+            f"[{record.job_id}] [{record.decision_id}] [{result_decision_id}] [{self.invocation_id}] STATUS: FAILED",
+            json.dumps(payload, ensure_ascii=False),
+        )
+        record.latest_invocation_id = self.invocation_id
+        record.latest_invocation_result = InvocationResult.FAILED
+        if message["mail_id"] not in record.handled_mail_ids:
+            record.handled_mail_ids.append(message["mail_id"])
+        self.jobs.save(record)
+        self._log(
+            "invocation_rejected",
+            job_id=record.job_id,
+            mail_id=message.get("mail_id"),
+            error=reason,
+        )
+        return record
+
+    def _validate_inbound_metadata(
+        self, record: JobRecord, message: dict
+    ) -> dict[str, object] | None:
+        """Validate structured lineage before mutating persistent state.
+
+        The first human request may remain plain text for compatibility. Once a
+        job exists, worker and commander messages are machine-to-machine
+        results, so their JSON metadata is the canonical routing source.
+        """
+
+        internal_sender = message.get("sender_uid") in {
+            record.current_agent_uid,
+            record.commander_uid,
+        }
+        strict_internal = internal_sender and self.trigger_mail_uid is not None
+        try:
+            payload = json.loads(message.get("body", ""))
+        except (TypeError, json.JSONDecodeError) as err:
+            if strict_internal:
+                raise DirectorError(
+                    "internal agent result body must be a JSON object"
+                ) from err
+            return None
+        if not isinstance(payload, dict):
+            if strict_internal:
+                raise DirectorError(
+                    "internal agent result body must be a JSON object"
+                )
+            return None
+        has_lineage = any(
+            key in payload
+            for key in (
+                "invocation_id",
+                "parent_invocation_id",
+                "root_invocation_id",
+                "trigger_mail_uid",
+            )
+        )
+        if not has_lineage:
+            if strict_internal:
+                raise DirectorError(
+                    "internal agent result is missing Invocation metadata"
+                )
+            return payload
+        try:
+            from .state_machine import validate_invocation_id
+        except ImportError:
+            from state_machine import validate_invocation_id
+        inbound_invocation = payload.get("invocation_id")
+        validate_invocation_id(inbound_invocation)
+        if inbound_invocation != self.parent_invocation_id:
+            raise DirectorError("inbound invocation_id does not match launch parent")
+        inbound_root = payload.get("root_invocation_id")
+        validate_invocation_id(inbound_root)
+        if inbound_root != self.root_invocation_id:
+            raise DirectorError("inbound root_invocation_id does not match launch root")
+        inbound_parent = payload.get("parent_invocation_id")
+        if inbound_parent is not None:
+            validate_invocation_id(inbound_parent)
+        inbound_trigger = payload.get("trigger_mail_uid")
+        if (
+            isinstance(inbound_trigger, bool)
+            or not isinstance(inbound_trigger, int)
+            or inbound_trigger <= 0
+        ):
+            raise DirectorError("inbound trigger_mail_uid must be positive")
+        if payload.get("job_id") != record.job_id:
+            raise DirectorError("inbound job_id does not match Director job")
+        if payload.get("decision_id") != record.decision_id:
+            raise DirectorError("inbound decision_id does not match Director decision")
+        if strict_internal:
+            message_type = payload.get("message_type")
+            if not isinstance(message_type, str) or not message_type:
+                raise DirectorError("internal agent result is missing message_type")
+            if payload.get("task_eligible") is not True:
+                raise DirectorError("internal agent result is not task eligible")
+            invocation_result = payload.get("invocation_result")
+            if invocation_result is not None and invocation_result not in {
+                InvocationResult.COMPLETED,
+                InvocationResult.DELEGATED,
+                InvocationResult.WAITING,
+                InvocationResult.FAILED,
+            }:
+                raise DirectorError("internal agent result has invalid InvocationResult")
+            if message.get("sender_uid") == record.current_agent_uid:
+                expected_parent = record.expected_worker_parent_invocation_id
+                expected_trigger = record.expected_worker_trigger_mail_uid
+                active_invocation = record.active_worker_invocation_id
+            else:
+                expected_parent = record.expected_commander_parent_invocation_id
+                expected_trigger = record.expected_commander_trigger_mail_uid
+                active_invocation = record.active_commander_invocation_id
+            if not expected_parent or expected_trigger <= 0:
+                raise DirectorError(
+                    "no issued child task matches the internal agent result"
+                )
+            if inbound_parent != expected_parent:
+                raise DirectorError(
+                    "inbound parent_invocation_id does not match issued child task"
+                )
+            if inbound_trigger != expected_trigger:
+                raise DirectorError(
+                    "inbound trigger_mail_uid does not match issued child task"
+                )
+            if active_invocation and inbound_invocation != active_invocation:
+                raise DirectorError(
+                    "inbound invocation_id does not match active child Invocation"
+                )
+        return payload
+
+    @staticmethod
+    def _inbound_event_key(payload: dict[str, object]) -> str:
+        """Return a stable key used to suppress duplicate result mails."""
+
+        fields = {
+            "invocation_id": payload.get("invocation_id"),
+            "message_type": payload.get("message_type"),
+            "invocation_result": payload.get("invocation_result"),
+            "status": payload.get("status"),
+        }
+        return json.dumps(fields, sort_keys=True, separators=(",", ":"))
+
     def _ack(self, record: JobRecord, recipient: str) -> None:
         ack_decision = f"{record.decision_id}-ACK"
-        subject = f"[{record.job_id}] [{ack_decision}] STATUS: ACK"
-        self._send(record, recipient, ack_decision, subject, json.dumps({"status": "ACK_RECEIVED", "job_id": record.job_id, "decision_id": record.decision_id, "invocation_id": self.invocation_id}, ensure_ascii=False))
+        subject = f"[{record.job_id}] [{ack_decision}] [{self.invocation_id}] STATUS: ACK"
+        payload = {
+            "message_type": "INVOCATION_ACK",
+            "task_eligible": False,
+            "status": "ACK_RECEIVED",
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            **self._invocation_metadata(),
+        }
+        self._send(
+            record,
+            recipient,
+            ack_decision,
+            subject,
+            json.dumps(payload, ensure_ascii=False),
+        )
 
     def _save_worker_wait_checkpoint(self, record: JobRecord) -> str:
         path = self.root / "director" / "checkpoints" / record.job_id / f"{record.decision_id}-worker-wait.json"
@@ -143,15 +370,22 @@ class DirectorEngine:
         record.latest_checkpoint = self._save_worker_wait_checkpoint(record)
         self.jobs.save(record)
         body = json.dumps({
+            "message_type": "INVOCATION_RESULT",
+            "task_eligible": False,
             "status": "WAITING_FOR_WORKER",
+            "director_state": JobState.WAITING_FOR_WORKER,
+            "invocation_result": InvocationResult.WAITING,
             "job_id": record.job_id,
             "decision_id": record.decision_id,
-            "invocation_id": self.invocation_id,
+            **self._invocation_metadata(),
             "delegate_mail_id": record.delegate_mail_id,
             "checkpoint": record.latest_checkpoint,
             "summary": "workerへ委任済み。Jobは非終端でworkerの応答を待つ。",
         }, ensure_ascii=False)
-        self._send(record, record.requester_uid, f"{record.decision_id}-WAITING-FOR-WORKER", f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] STATUS: WAITING_FOR_WORKER", body)
+        result_mail_uid = self._send(record, record.requester_uid, f"{record.decision_id}-WAITING-FOR-WORKER", f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] STATUS: WAITING_FOR_WORKER", body)
+        record.latest_invocation_result = InvocationResult.WAITING
+        record.result_mail_uid = result_mail_uid
+        self.jobs.save(record)
         return record
 
     def _create_record(self, message: dict) -> JobRecord:
@@ -161,7 +395,20 @@ class DirectorEngine:
         if existing:
             return existing
         decision_id = _id(DEC_RE, message["subject"], "Decision-ID")
-        record = JobRecord(job_id, message["mail_id"], message["sender_uid"], self.uids["worker"], self.uids["commander"], decision_id, JobState.DISCOVERED, request_summary=message.get("body", "")[:4000], latest_invocation_id=self.invocation_id)
+        record = JobRecord(
+            job_id,
+            message["mail_id"],
+            message["sender_uid"],
+            self.uids["worker"],
+            self.uids["commander"],
+            decision_id,
+            JobState.DISCOVERED,
+            request_summary=message.get("body", "")[:4000],
+            latest_invocation_id=self.invocation_id,
+            parent_invocation_id=self.parent_invocation_id,
+            root_invocation_id=self.root_invocation_id,
+            trigger_mail_uid=self.trigger_mail_uid or 0,
+        )
         self.jobs.save(record)
         return record
 
@@ -170,15 +417,26 @@ class DirectorEngine:
         record = record.transition(JobState.ACK_SENT)
         self.jobs.save(record)
         record = record.transition(JobState.DELEGATION_PENDING)
-        body = "\n".join([
-            f"Job-ID: {record.job_id}", f"Decision-ID: {record.decision_id}",
-            "Role: claude_worker", "Task: execute the requested work and report questions or completion.",
-            "Required: send ACK and a terminal COMPLETED/FAILED/HUMAN_REQUIRED mail.",
-            "Prohibitions: do not modify director code, config, or SPEC; do not commit or push.",
-            "For a blocking question, send a mail containing QANDA and the Q-number.",
-            "Original request summary: " + message.get("body", "")[:4000],
-        ])
+        body = json.dumps(
+            {
+                "message_type": "TASK",
+                "task_eligible": True,
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                **self._invocation_metadata(),
+                "role": "claude_worker",
+                "task": "execute the requested work and report questions or completion",
+                "required": "send ACK and a terminal COMPLETED/FAILED/HUMAN_REQUIRED mail",
+                "prohibitions": "do not modify director code, config, or SPEC; do not commit or push",
+                "blocking_question": "send JSON with message_type=QUESTION, task_eligible=true, Invocation lineage, and the Q-number",
+                "original_request_summary": message.get("body", "")[:4000],
+            },
+            ensure_ascii=False,
+        )
         record.delegate_mail_id = self._send(record, record.current_agent_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] DELEGATE", body)
+        record.expected_worker_parent_invocation_id = self.invocation_id
+        record.expected_worker_trigger_mail_uid = record.delegate_mail_id
+        record.active_worker_invocation_id = ""
         record = self._waiting_for_worker(record)
         record.round_count += 1
         self.jobs.save(record)
@@ -212,16 +470,39 @@ class DirectorEngine:
 
     def _request_decision(self, record: JobRecord, question: str) -> JobRecord:
         packet, size, tokens = self._build_packet(record, question)
+        record = record.transition(JobState.DECISION_PENDING)
+        record.decision_count += 1
+        record.latest_invocation_id = self.invocation_id
+        record.parent_invocation_id = self.parent_invocation_id
+        record.root_invocation_id = self.root_invocation_id
+        record.trigger_mail_uid = self.trigger_mail_uid or 0
+        self.jobs.save(record)
         body = json.dumps({
-            "type": "DECISION_REQUEST", "job_id": record.job_id, "decision_id": record.decision_id,
+            "message_type": "DECISION_REQUEST",
+            "task_eligible": True,
+            "status": "DELEGATED",
+            "director_state": JobState.DECISION_PENDING,
+            "invocation_result": InvocationResult.DELEGATED,
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            **self._invocation_metadata(),
             "context_packet": packet, "question": question,
             "allowed_actions": ["ANSWER", "CONTINUE", "REVISE", "DELEGATE", "COMPLETE", "HUMAN_REQUIRED", "REJECT"],
             "answer_json": "{action, job_id, decision_id, confidence, reason, answer, target_agent, requires_human}",
             "required": "ACK and terminal notification are mandatory.",
         }, ensure_ascii=False)
-        self._send(record, record.commander_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] DECISION_REQUEST", body)
-        record = record.transition(JobState.DECISION_PENDING)
-        record.decision_count += 1
+        result_mail_uid = self._send(
+            record,
+            record.commander_uid,
+            record.decision_id,
+            f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] DECISION_REQUEST",
+            body,
+        )
+        record.latest_invocation_result = InvocationResult.DELEGATED
+        record.result_mail_uid = result_mail_uid
+        record.expected_commander_parent_invocation_id = self.invocation_id
+        record.expected_commander_trigger_mail_uid = result_mail_uid
+        record.active_commander_invocation_id = ""
         self.jobs.save(record)
         self._log("context_packet", job_id=record.job_id, decision_id=record.decision_id, path=packet, bytes=size, estimated_tokens=tokens)
         return record
@@ -237,8 +518,13 @@ class DirectorEngine:
             if isinstance(checkpoint, str) and not Path(checkpoint).is_absolute() and (self.root / checkpoint).resolve().is_file():
                 (self.root / checkpoint).resolve().relative_to(self.root)
                 record.latest_checkpoint = checkpoint
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+        except (json.JSONDecodeError, ValueError, TypeError) as err:
+            self._log(
+                "worker_checkpoint_ignored",
+                job_id=record.job_id,
+                mail_id=message.get("mail_id"),
+                error=type(err).__name__,
+            )
         self.jobs.save(record)
         return record
 
@@ -247,12 +533,31 @@ class DirectorEngine:
         return self._human_required(record, "作業AIのCLIタイムアウト通知を受信しました。質問メールが併存していても自動再開しません。")
 
     def _human_required(self, record: JobRecord, reason: str) -> JobRecord:
-        record = record.transition(JobState.HUMAN_REQUIRED)
+        if record.state not in TERMINAL_STATES:
+            record = record.transition(JobState.HUMAN_REQUIRED)
+        record.latest_invocation_id = self.invocation_id
         self.jobs.save(record)
+        body = json.dumps(
+            {
+                "message_type": "HUMAN_REQUIRED",
+                "task_eligible": True,
+                "status": "HUMAN_REQUIRED",
+                "director_state": record.state,
+                "invocation_result": InvocationResult.FAILED,
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                **self._invocation_metadata(),
+                "reason": reason,
+            },
+            ensure_ascii=False,
+        )
         try:
-            self._send(record, self.uids["human"], f"{record.decision_id}-HUMAN", f"[{record.job_id}] [{record.decision_id}] HUMAN_REQUIRED", reason)
+            record.result_mail_uid = self._send(record, self.uids["human"], f"{record.decision_id}-HUMAN", f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] HUMAN_REQUIRED", body)
         except Exception as err:
             self._log("human_notify_failed", job_id=record.job_id, error=type(err).__name__)
+            raise
+        record.latest_invocation_result = InvocationResult.FAILED
+        self.jobs.save(record)
         return record
 
     def _handle_question(self, record: JobRecord, message: dict) -> JobRecord:
@@ -294,12 +599,37 @@ class DirectorEngine:
         record = record.transition(JobState.ANSWER_PENDING)
         self.jobs.save(record)
         packet, size, tokens = self._build_packet(record, f"Resume from checkpoint {record.latest_checkpoint}; use the formal Q&A answer: {answer}")
-        body = json.dumps({"job_id": record.job_id, "decision_id": record.decision_id, "answer": answer, "action": "ANSWER", "reason": reason, "context_packet": packet, "instruction": "Start a new CLI context. Do not repeat the answered question. Send ACK, then COMPLETED or WAITING_FOR_DECISION only if strictly necessary."}, ensure_ascii=False)
-        self._send(record, record.current_agent_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] ANSWER RESUME", body)
+        resumed_record = record.transition(JobState.WORKER_RESUMED)
+        body = json.dumps({
+            "message_type": "TASK",
+            "task_eligible": True,
+            "status": "DELEGATED",
+            "director_state": resumed_record.state,
+            "invocation_result": InvocationResult.DELEGATED,
+            "job_id": record.job_id,
+            "decision_id": record.decision_id,
+            **self._invocation_metadata(),
+            "answer": answer,
+            "action": "ANSWER",
+            "reason": reason,
+            "context_packet": packet,
+            "instruction": "Start a new CLI context. Do not repeat the answered question. Send ACK, then COMPLETED or WAITING_FOR_DECISION only if strictly necessary.",
+        }, ensure_ascii=False)
+        record.result_mail_uid = self._send(record, record.current_agent_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] ANSWER RESUME", body)
+        record.latest_invocation_id = self.invocation_id
+        record.latest_invocation_result = InvocationResult.DELEGATED
+        record.expected_worker_parent_invocation_id = self.invocation_id
+        record.expected_worker_trigger_mail_uid = record.result_mail_uid
+        record.active_worker_invocation_id = ""
         self._log("resume_context_packet", job_id=record.job_id, decision_id=record.decision_id, path=packet, bytes=size, estimated_tokens=tokens)
-        record = record.transition(JobState.WORKER_RESUMED)
-        self.jobs.save(record)
-        return record
+        resumed_record.result_mail_uid = record.result_mail_uid
+        resumed_record.latest_invocation_id = record.latest_invocation_id
+        resumed_record.latest_invocation_result = record.latest_invocation_result
+        resumed_record.expected_worker_parent_invocation_id = record.expected_worker_parent_invocation_id
+        resumed_record.expected_worker_trigger_mail_uid = record.expected_worker_trigger_mail_uid
+        resumed_record.active_worker_invocation_id = ""
+        self.jobs.save(resumed_record)
+        return resumed_record
 
     def _handle_decision(self, record: JobRecord, message: dict) -> JobRecord:
         try:
@@ -351,7 +681,28 @@ class DirectorEngine:
             return self._human_required(record, f"成果物検証失敗: {err}")
         record = record.transition(JobState.VERIFYING)
         self.jobs.save(record)
-        self._send(record, record.requester_uid, f"{record.decision_id}-FINAL", f"[{record.job_id}] [{record.decision_id}] STATUS: COMPLETED", body[:4000])
+        result_payload = dict(payload)
+        result_payload.update(
+            {
+                "status": "COMPLETED",
+                "message_type": "INVOCATION_RESULT",
+                "task_eligible": False,
+                "director_state": JobState.COMPLETED,
+                "invocation_result": InvocationResult.COMPLETED,
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                **self._invocation_metadata(),
+            }
+        )
+        record.result_mail_uid = self._send(
+            record,
+            record.requester_uid,
+            f"{record.decision_id}-FINAL",
+            f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] STATUS: COMPLETED",
+            json.dumps(result_payload, ensure_ascii=False),
+        )
+        record.latest_invocation_id = self.invocation_id
+        record.latest_invocation_result = InvocationResult.COMPLETED
         record = record.transition(JobState.COMPLETED)
         self.jobs.save(record)
         return record
@@ -359,32 +710,154 @@ class DirectorEngine:
     def _process(self, message: dict) -> JobRecord:
         record = self._create_record(message)
         if message["mail_id"] in record.handled_mail_ids:
-            return record
-        record.handled_mail_ids.append(message["mail_id"])
-        try:
-            payload = json.loads(message.get("body", ""))
-            if isinstance(payload, dict) and isinstance(payload.get("invocation_id"), str):
-                record.latest_invocation_id = payload["invocation_id"]
-        except (TypeError, json.JSONDecodeError):
-            pass
-        self.jobs.save(record)
+            rejected_reason = record.rejected_mail_reasons.get(
+                str(int(message["mail_id"]))
+            )
+            if rejected_reason:
+                return self._fail_invocation(record, message, rejected_reason)
+            return self._complete_noop(record, message, "duplicate trigger already handled")
+
+        # Validate correlation before changing any persistent lineage fields.
+        payload = self._validate_inbound_metadata(record, message)
         sender = message["sender_uid"]
-        subject = message.get("subject", "")
-        if "[TIMEOUT]" in subject or "status: TIMED_OUT" in message.get("body", ""):
-            return self._handle_timeout(record, message)
-        if record.state == JobState.DISCOVERED:
-            return self._delegate(record, message)
-        if sender == record.current_agent_uid and ("WAITING_FOR_DECISION" in subject or '"status": "WAITING_FOR_DECISION"' in message.get("body", "")):
-            return self._handle_waiting(record, message)
-        if sender == record.current_agent_uid and ("QUESTION" in subject or "QANDA" in message.get("body", "")):
-            return self._handle_question(record, message)
-        if sender == record.commander_uid:
-            if "STATUS: ACK" in subject or '"status": "ACK_RECEIVED"' in message.get("body", ""):
-                return record
-            return self._handle_decision(record, message)
-        if sender == record.current_agent_uid and "COMPLETE" in subject:
-            return self._handle_completion(record, message)
-        return record
+        internal_sender = sender in {record.current_agent_uid, record.commander_uid}
+        event_key = ""
+        if internal_sender and payload is not None and payload.get("invocation_id"):
+            event_key = self._inbound_event_key(payload)
+            canonical_mail_uid = record.inbound_result_mail_uids.get(event_key)
+            if canonical_mail_uid is not None:
+                canonical_mail_uid = min(canonical_mail_uid, int(message["mail_id"]))
+                record.inbound_result_mail_uids[event_key] = canonical_mail_uid
+                self._log(
+                    "duplicate_invocation_result",
+                    job_id=record.job_id,
+                    mail_id=message["mail_id"],
+                    canonical_mail_uid=canonical_mail_uid,
+                    inbound_invocation_id=payload.get("invocation_id"),
+                )
+                result = self._complete_noop(
+                    record,
+                    message,
+                    "duplicate Invocation result ignored; canonical result retained",
+                )
+                if message["mail_id"] not in result.handled_mail_ids:
+                    result.handled_mail_ids.append(message["mail_id"])
+                    self.jobs.save(result)
+                return result
+
+        record.latest_invocation_id = self.invocation_id
+        record.parent_invocation_id = self.parent_invocation_id
+        record.root_invocation_id = self.root_invocation_id
+        record.trigger_mail_uid = self.trigger_mail_uid or int(message["mail_id"])
+        if internal_sender and payload is not None and payload.get("invocation_id"):
+            record.last_inbound_invocation_id = str(payload["invocation_id"])
+            if sender == record.current_agent_uid and not record.active_worker_invocation_id:
+                record.active_worker_invocation_id = str(payload["invocation_id"])
+            if sender == record.commander_uid and not record.active_commander_invocation_id:
+                record.active_commander_invocation_id = str(payload["invocation_id"])
+        self.jobs.save(record)
+
+        if record.state in TERMINAL_STATES:
+            result = self._complete_noop(
+                record, message, "late result ignored; Director state is terminal"
+            )
+        elif record.state == JobState.DISCOVERED:
+            result = self._delegate(record, message)
+        elif internal_sender and (
+            payload is None or not isinstance(payload.get("message_type"), str)
+        ):
+            # Explicit manual/compatibility mode only. Orchestrated invocations
+            # always carry AI_TRIGGER_MAIL_UID and are rejected above unless
+            # their structured routing metadata is complete.
+            subject = message.get("subject", "")
+            body = message.get("body", "")
+            if "[TIMEOUT]" in subject or "status: TIMED_OUT" in body:
+                result = self._handle_timeout(record, message)
+            elif sender == record.current_agent_uid and (
+                "QUESTION" in subject or "QANDA" in body
+            ):
+                result = self._handle_question(record, message)
+            elif sender == record.current_agent_uid and (
+                "WAITING_FOR_DECISION" in subject
+                or '"status": "WAITING_FOR_DECISION"' in body
+            ):
+                result = self._handle_waiting(record, message)
+                result = self._complete_noop(
+                    result, message, "worker waiting state already recorded"
+                )
+            elif sender == record.commander_uid:
+                if "STATUS: ACK" in subject or '"status": "ACK_RECEIVED"' in body:
+                    result = self._complete_noop(record, message, "commander ACK recorded")
+                else:
+                    result = self._handle_decision(record, message)
+            elif sender == record.current_agent_uid and "COMPLETE" in subject:
+                result = self._handle_completion(record, message)
+            else:
+                result = self._complete_noop(
+                    record, message, "no additional Director action required"
+                )
+        elif sender == record.current_agent_uid:
+            assert payload is not None
+            message_type = payload.get("message_type")
+            invocation_result = payload.get("invocation_result")
+            status = payload.get("status")
+            if message_type == "QUESTION":
+                if record.state in {
+                    JobState.WAITING_FOR_WORKER,
+                    JobState.WORKER_RUNNING,
+                    JobState.WORKER_RESUMED,
+                }:
+                    result = self._handle_question(record, message)
+                else:
+                    result = self._complete_noop(
+                        record, message, "late worker question ignored for current state"
+                    )
+            elif invocation_result == InvocationResult.WAITING or status in {
+                "WAITING",
+                "WAITING_FOR_DECISION",
+                "WAITING_FOR_WORKER",
+            }:
+                result = self._handle_waiting(record, message)
+                result = self._complete_noop(
+                    result, message, "worker waiting state already recorded"
+                )
+            elif invocation_result == InvocationResult.COMPLETED or status == "COMPLETED":
+                result = self._handle_completion(record, message)
+            elif invocation_result == InvocationResult.FAILED or status in {
+                "FAILED",
+                "HUMAN_REQUIRED",
+                "REJECTED",
+                "CANCELLED",
+            }:
+                result = self._human_required(
+                    record, "作業AIが構造化された失敗結果を返しました"
+                )
+            else:
+                result = self._complete_noop(
+                    record, message, "unsupported worker result ignored"
+                )
+        elif sender == record.commander_uid:
+            assert payload is not None
+            if payload.get("message_type") == "INVOCATION_ACK":
+                result = self._complete_noop(record, message, "commander ACK recorded")
+            else:
+                result = self._handle_decision(record, message)
+        else:
+            result = self._complete_noop(
+                record, message, "no additional Director action required"
+            )
+        if event_key:
+            current_mail_uid = int(message["mail_id"])
+            prior_mail_uid = result.inbound_result_mail_uids.get(event_key)
+            result.inbound_result_mail_uids[event_key] = (
+                current_mail_uid
+                if prior_mail_uid is None
+                else min(prior_mail_uid, current_mail_uid)
+            )
+        if message["mail_id"] not in result.handled_mail_ids:
+            result.handled_mail_ids.append(message["mail_id"])
+            self.jobs.save(result)
+        return result
 
     def process_once(self) -> int:
         records = {record.job_id: record for record in self.jobs.list_records()}
@@ -395,23 +868,48 @@ class DirectorEngine:
                 record = records.get(entry.job_id)
                 if record:
                     self._human_required(record, "Outboxに同一Decision-IDの複数メールが存在します")
-        messages = self._load_pending()
-        messages.extend(self.mail.receive_mail(self.uid))
+        if self.trigger_mail_uid is not None:
+            messages = self.mail.receive_mail(
+                self.uid, mail_id=self.trigger_mail_uid
+            )
+            if not messages:
+                recovered = self.mail.find_mails(
+                    recipient_uid=self.uid,
+                    after_mail_id=max(self.trigger_mail_uid - 1, 0),
+                    limit=1,
+                )
+                messages = [
+                    message
+                    for message in recovered
+                    if int(message.get("mail_id", 0)) == self.trigger_mail_uid
+                ]
+            if not messages:
+                raise DirectorError(
+                    "AI_TRIGGER_MAIL_UID did not identify a Director mail"
+                )
+        else:
+            messages = self._load_pending()
+            messages.extend(self.mail.receive_mail(self.uid))
         unique: dict[int, dict] = {int(message["mail_id"]): message for message in messages}
         messages = [unique[key] for key in sorted(unique)]
-        limit = int(self.config.get("max_mails_per_once", 5))
+        limit = (
+            1
+            if self.trigger_mail_uid is not None
+            else int(self.config.get("max_mails_per_once", 5))
+        )
         if limit <= 0:
             raise DirectorError("max_mails_per_once must be positive")
-        self._save_pending(messages[limit:])
+        if self.trigger_mail_uid is None:
+            self._save_pending(messages[limit:])
         for message in messages[:limit]:
             try:
                 self._process(message)
-            except (DirectorError, StateError, ValueError) as err:
-                try:
-                    record = self._create_record(message)
-                    self._human_required(record, f"安全停止: {err}")
-                except Exception:
-                    self._log("processing_failed", mail_id=message.get("mail_id"), error=type(err).__name__)
+            except DirectorError as err:
+                record = self._create_record(message)
+                self._fail_invocation(record, message, f"相関検証失敗: {err}")
+            except (StateError, ValueError) as err:
+                record = self._create_record(message)
+                self._human_required(record, f"安全停止: {err}")
         return min(len(messages), limit)
 
     def _load_pending(self) -> list[dict]:

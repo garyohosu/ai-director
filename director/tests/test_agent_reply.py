@@ -12,7 +12,12 @@ import sys
 from director.tests import helper
 
 from director.agent_reply import validate_and_read_result_file, validate_wait_payload, mask_secrets
-from director.ids import InvocationIdError, new_manual_invocation_id, resolve_invocation_id
+from director.ids import (
+    InvocationIdError,
+    new_manual_invocation_id,
+    resolve_invocation_id,
+    resolve_invocation_metadata,
+)
 
 
 class TestAgentReply(unittest.TestCase):
@@ -164,6 +169,23 @@ class TestAgentReply(unittest.TestCase):
         )
         self.assertTrue(resolved.startswith("MANUAL-"))
         self.assertEqual(uuid.UUID(resolved.removeprefix("MANUAL-")).version, 4)
+
+    def test_resolve_invocation_lineage_product_function(self):
+        metadata = resolve_invocation_metadata(
+            {
+                "AI_PARENT_INVOCATION_ID": "INV-PARENT",
+                "AI_ROOT_INVOCATION_ID": "INV-ROOT",
+                "AI_TRIGGER_MAIL_UID": "42",
+            },
+            "INV-CURRENT",
+        )
+        self.assertEqual(metadata.parent_invocation_id, "INV-PARENT")
+        self.assertEqual(metadata.root_invocation_id, "INV-ROOT")
+        self.assertEqual(metadata.trigger_mail_uid, 42)
+        root = resolve_invocation_metadata({}, "INV-CURRENT")
+        self.assertIsNone(root.parent_invocation_id)
+        self.assertEqual(root.root_invocation_id, "INV-CURRENT")
+        self.assertIsNone(root.trigger_mail_uid)
 
     def test_deduplication_and_state_transitions(self):
         db_path = self.root / "mail.db"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 JOB_RE = re.compile(r"^JOB-[A-Za-z0-9._-]+$")
 DECISION_RE = re.compile(r"^DEC-[A-Za-z0-9._-]+$")
-INVOCATION_RE = re.compile(r"^INV-[A-Za-z0-9._-]+$")
+INVOCATION_RE = re.compile(r"^(?:INV|MANUAL)-[A-Za-z0-9._-]+$")
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -18,7 +18,9 @@ class StateError(ValueError):
     pass
 
 
-class JobState:
+class DirectorState:
+    """Long-lived workflow state for one Director job."""
+
     DISCOVERED = "DISCOVERED"
     ACK_SENT = "ACK_SENT"
     DELEGATION_PENDING = "DELEGATION_PENDING"
@@ -37,6 +39,19 @@ class JobState:
     FAILED = "FAILED"
     HUMAN_REQUIRED = "HUMAN_REQUIRED"
     CANCELLED = "CANCELLED"
+
+
+class InvocationResult:
+    """Outcome of one CLI invocation, independent of DirectorState."""
+
+    COMPLETED = "COMPLETED"
+    DELEGATED = "DELEGATED"
+    WAITING = "WAITING"
+    FAILED = "FAILED"
+
+
+# Compatibility name retained for existing callers and persisted records.
+JobState = DirectorState
 
 
 TERMINAL_STATES = {JobState.COMPLETED, JobState.FAILED, JobState.HUMAN_REQUIRED, JobState.CANCELLED}
@@ -98,14 +113,80 @@ class JobRecord:
     updated_at: str = field(default_factory=utc_now)
     request_summary: str = ""
     latest_invocation_id: str = ""
+    last_inbound_invocation_id: str = ""
+    latest_invocation_result: str = ""
+    parent_invocation_id: str | None = None
+    root_invocation_id: str = ""
+    trigger_mail_uid: int = 0
+    result_mail_uid: int = 0
+    inbound_result_mail_uids: dict[str, int] = field(default_factory=dict)
+    rejected_mail_reasons: dict[str, str] = field(default_factory=dict)
     delegate_mail_id: int = 0
+    expected_worker_parent_invocation_id: str = ""
+    expected_worker_trigger_mail_uid: int = 0
+    active_worker_invocation_id: str = ""
+    expected_commander_parent_invocation_id: str = ""
+    expected_commander_trigger_mail_uid: int = 0
+    active_commander_invocation_id: str = ""
 
     def __post_init__(self) -> None:
         validate_job_id(self.job_id)
         validate_decision_id(self.decision_id)
         validate_invocation_id(self.latest_invocation_id)
+        validate_invocation_id(self.last_inbound_invocation_id)
+        validate_invocation_id(self.parent_invocation_id or "")
+        validate_invocation_id(self.root_invocation_id)
+        validate_invocation_id(self.expected_worker_parent_invocation_id)
+        validate_invocation_id(self.active_worker_invocation_id)
+        validate_invocation_id(self.expected_commander_parent_invocation_id)
+        validate_invocation_id(self.active_commander_invocation_id)
+        if self.latest_invocation_result and self.latest_invocation_result not in {
+            InvocationResult.COMPLETED,
+            InvocationResult.DELEGATED,
+            InvocationResult.WAITING,
+            InvocationResult.FAILED,
+        }:
+            raise StateError(
+                f"invalid InvocationResult: {self.latest_invocation_result!r}"
+            )
         if self.state not in {v for k, v in vars(JobState).items() if not k.startswith("_") and isinstance(v, str)}:
             raise StateError(f"invalid state: {self.state!r}")
+        for name in (
+            "request_mail_id", "round_count", "decision_count",
+            "trigger_mail_uid", "result_mail_uid", "delegate_mail_id",
+            "expected_worker_trigger_mail_uid",
+            "expected_commander_trigger_mail_uid",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise StateError(f"invalid non-negative integer {name}: {value!r}")
+        if not isinstance(self.handled_mail_ids, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in self.handled_mail_ids
+        ):
+            raise StateError("handled_mail_ids must contain positive integers")
+        if not isinstance(self.inbound_result_mail_uids, dict) or any(
+            not isinstance(key, str)
+            or not key
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+            for key, value in self.inbound_result_mail_uids.items()
+        ):
+            raise StateError(
+                "inbound_result_mail_uids must map event keys to positive integers"
+            )
+        if not isinstance(self.rejected_mail_reasons, dict) or any(
+            not isinstance(key, str)
+            or not key.isdigit()
+            or int(key) <= 0
+            or not isinstance(reason, str)
+            or not reason
+            for key, reason in self.rejected_mail_reasons.items()
+        ):
+            raise StateError(
+                "rejected_mail_reasons must map positive mail IDs to reasons"
+            )
 
     def transition(self, target: str) -> "JobRecord":
         if target == self.state:
@@ -131,6 +212,7 @@ class JobStore:
         return path
 
     def save(self, record: JobRecord) -> None:
+        record.__post_init__()
         path = self.path_for(record.job_id)
         payload = json.dumps(asdict(record), ensure_ascii=False, indent=2) + "\n"
         path.write_text(payload, encoding="utf-8")
@@ -142,6 +224,20 @@ class JobStore:
         data = json.loads(path.read_text(encoding="utf-8"))
         data.setdefault("request_summary", "")
         data.setdefault("latest_invocation_id", "")
+        data.setdefault("last_inbound_invocation_id", "")
+        data.setdefault("latest_invocation_result", "")
+        data.setdefault("parent_invocation_id", None)
+        data.setdefault("root_invocation_id", "")
+        data.setdefault("trigger_mail_uid", 0)
+        data.setdefault("result_mail_uid", 0)
+        data.setdefault("inbound_result_mail_uids", {})
+        data.setdefault("rejected_mail_reasons", {})
+        data.setdefault("expected_worker_parent_invocation_id", "")
+        data.setdefault("expected_worker_trigger_mail_uid", 0)
+        data.setdefault("active_worker_invocation_id", "")
+        data.setdefault("expected_commander_parent_invocation_id", "")
+        data.setdefault("expected_commander_trigger_mail_uid", 0)
+        data.setdefault("active_commander_invocation_id", "")
         return JobRecord(**data)
 
     def list_records(self) -> list[JobRecord]:
@@ -150,5 +246,19 @@ class JobStore:
             data = json.loads(path.read_text(encoding="utf-8"))
             data.setdefault("request_summary", "")
             data.setdefault("latest_invocation_id", "")
+            data.setdefault("last_inbound_invocation_id", "")
+            data.setdefault("latest_invocation_result", "")
+            data.setdefault("parent_invocation_id", None)
+            data.setdefault("root_invocation_id", "")
+            data.setdefault("trigger_mail_uid", 0)
+            data.setdefault("result_mail_uid", 0)
+            data.setdefault("inbound_result_mail_uids", {})
+            data.setdefault("rejected_mail_reasons", {})
+            data.setdefault("expected_worker_parent_invocation_id", "")
+            data.setdefault("expected_worker_trigger_mail_uid", 0)
+            data.setdefault("active_worker_invocation_id", "")
+            data.setdefault("expected_commander_parent_invocation_id", "")
+            data.setdefault("expected_commander_trigger_mail_uid", 0)
+            data.setdefault("active_commander_invocation_id", "")
             records.append(JobRecord(**data))
         return records

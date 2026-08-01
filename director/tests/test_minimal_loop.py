@@ -6,15 +6,23 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from context_packet import ContextPacketBuilder
 from decision import DecisionError, parse_decision
-from director.director import DirectorEngine
+from director.director import DirectorEngine, DirectorError
 from outbox import Outbox, OutboxEntry, OutboxError
 from qanda import QandaError, answer_question, find_answered_reuse, find_open_blocking, normalized_reuse_signature, parse_qanda
-from state_machine import JobRecord, JobState, JobStore, StateError
+from state_machine import (
+    DirectorState,
+    InvocationResult,
+    JobRecord,
+    JobState,
+    JobStore,
+    StateError,
+)
 
 
 class FakeMail:
@@ -36,8 +44,14 @@ class FakeMail:
         self.messages.append({"mail_id": mail_id, "sender_uid": sender_uid, "recipient_uid": recipient_uid, "subject": subject, "body": body, "is_read": False})
         return mail_id
 
-    def receive_mail(self, uid: str) -> list[dict]:
-        result = [m for m in self.messages if m["recipient_uid"] == uid and not m["is_read"]]
+    def receive_mail(self, uid: str, *, mail_id: int | None = None) -> list[dict]:
+        result = [
+            m
+            for m in self.messages
+            if m["recipient_uid"] == uid
+            and not m["is_read"]
+            and (mail_id is None or m["mail_id"] == mail_id)
+        ]
         for message in result:
             message["is_read"] = True
         return result
@@ -58,6 +72,35 @@ class FakeMail:
 
 
 class DirectorUnitTests(unittest.TestCase):
+    _INVOCATION_ENV_KEYS = (
+        "AI_INVOCATION_ID",
+        "INVOCATION_ID",
+        "AI_PARENT_INVOCATION_ID",
+        "AI_ROOT_INVOCATION_ID",
+        "AI_TRIGGER_MAIL_UID",
+        "AI_ALLOW_MISSING_INVOCATION_ID",
+    )
+
+    def setUp(self) -> None:
+        self._saved_invocation_env = {
+            key: os.environ[key]
+            for key in self._INVOCATION_ENV_KEYS
+            if key in os.environ
+        }
+        for key in self._INVOCATION_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ["AI_ALLOW_MISSING_INVOCATION_ID"] = "1"
+
+    def tearDown(self) -> None:
+        for key in self._INVOCATION_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(self._saved_invocation_env)
+
+    def test_director_state_and_invocation_result_are_separate(self) -> None:
+        self.assertIsNot(DirectorState, InvocationResult)
+        self.assertEqual(DirectorState.DECISION_PENDING, "DECISION_PENDING")
+        self.assertEqual(InvocationResult.DELEGATED, "DELEGATED")
+
     def test_director_delegate_waits_with_invocation_bound_terminal_mail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -109,6 +152,556 @@ class DirectorUnitTests(unittest.TestCase):
             self.assertEqual(restored.latest_invocation_id, "INV-INV-001")
             with self.assertRaises(StateError):
                 JobRecord("JOB-INV-002", 1, "UID000001", "UID000002", "UID000003", "DEC-INV-002", JobState.WORKER_RUNNING, latest_invocation_id="DEC-NOT-INV")
+
+    def test_decision_request_finishes_invocation_as_delegated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            worker_uid = mail.register_user("claude_worker")
+            commander_uid = mail.register_user("codex_commander")
+            human_uid = mail.register_user("human_controller")
+            (root / "QandA.md").write_text(
+                """# QandA.md
+
+## Q010
+- Status: OPEN
+- Request-ID: JOB-DELEGATE-001
+- From: claude_worker
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: Which encoding?
+- Proposed-Answer: UTF-8
+- Evidence: test
+""",
+                encoding="utf-8",
+            )
+            question_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-DELEGATE-001] [DEC-DELEGATE-001] QUESTION Q010",
+                json.dumps(
+                    {
+                        "message_type": "QUESTION",
+                        "task_eligible": True,
+                        "job_id": "JOB-DELEGATE-001",
+                        "decision_id": "DEC-DELEGATE-001",
+                        "invocation_id": "INV-WORKER-001",
+                        "parent_invocation_id": "INV-ROOT-001",
+                        "root_invocation_id": "INV-ROOT-001",
+                        "trigger_mail_uid": 1,
+                    }
+                ),
+            )
+            environment = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-002",
+                "INVOCATION_ID": "INV-DIRECTOR-002",
+                "AI_PARENT_INVOCATION_ID": "INV-WORKER-001",
+                "AI_ROOT_INVOCATION_ID": "INV-ROOT-001",
+                "AI_TRIGGER_MAIL_UID": str(question_id),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                engine.jobs.save(
+                    JobRecord(
+                        "JOB-DELEGATE-001",
+                        1,
+                        human_uid,
+                        worker_uid,
+                        commander_uid,
+                        "DEC-DELEGATE-001",
+                        JobState.WAITING_FOR_WORKER,
+                        expected_worker_parent_invocation_id="INV-ROOT-001",
+                        expected_worker_trigger_mail_uid=1,
+                    )
+                )
+                self.assertEqual(engine.process_once(), 1)
+
+            record = engine.jobs.load("JOB-DELEGATE-001")
+            self.assertEqual(record.state, DirectorState.DECISION_PENDING)
+            self.assertEqual(
+                record.latest_invocation_result, InvocationResult.DELEGATED
+            )
+            delegated = next(
+                message
+                for message in mail.messages
+                if message["mail_id"] == record.result_mail_uid
+            )
+            self.assertEqual(delegated["recipient_uid"], commander_uid)
+            payload = json.loads(delegated["body"])
+            self.assertEqual(payload["invocation_result"], "DELEGATED")
+            self.assertEqual(payload["director_state"], "DECISION_PENDING")
+            self.assertEqual(payload["parent_invocation_id"], "INV-WORKER-001")
+            self.assertEqual(payload["root_invocation_id"], "INV-ROOT-001")
+            self.assertEqual(payload["trigger_mail_uid"], question_id)
+            self.assertEqual(record.result_mail_uid, delegated["mail_id"])
+
+    def test_trigger_mail_uid_consumes_only_the_selected_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            human_uid = mail.register_user("human_controller")
+            first_id = mail.send_mail(
+                human_uid,
+                director_uid,
+                "[JOB-TRIGGER-001] [DEC-TRIGGER-001] request",
+                "first task",
+            )
+            second_id = mail.send_mail(
+                human_uid,
+                director_uid,
+                "[JOB-TRIGGER-002] [DEC-TRIGGER-002] request",
+                "second task",
+            )
+            environment = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-TRIGGER",
+                "INVOCATION_ID": "INV-DIRECTOR-TRIGGER",
+                "AI_ROOT_INVOCATION_ID": "INV-DIRECTOR-TRIGGER",
+                "AI_TRIGGER_MAIL_UID": str(first_id),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                engine = DirectorEngine(
+                    root, mail=mail, config_path=root / "missing.json"
+                )
+                self.assertEqual(engine.process_once(), 1)
+
+            first = next(m for m in mail.messages if m["mail_id"] == first_id)
+            second = next(m for m in mail.messages if m["mail_id"] == second_id)
+            self.assertTrue(first["is_read"])
+            self.assertFalse(second["is_read"])
+            self.assertIsNotNone(engine.jobs.load("JOB-TRIGGER-001"))
+            self.assertIsNone(engine.jobs.load("JOB-TRIGGER-002"))
+
+    def test_question_then_separate_waiting_trigger_returns_noop_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            (root / "QandA.md").write_text(
+                """# QandA.md
+
+## Q010
+- Status: OPEN
+- Request-ID: JOB-SEPARATE-001
+- From: claude_worker
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: Which encoding?
+- Proposed-Answer: UTF-8
+- Evidence: test
+""",
+                encoding="utf-8",
+            )
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            worker_uid = mail.register_user("claude_worker")
+            commander_uid = mail.register_user("codex_commander")
+            human_uid = mail.register_user("human_controller")
+            worker_payload = {
+                "message_type": "INVOCATION_RESULT",
+                "task_eligible": True,
+                "job_id": "JOB-SEPARATE-001",
+                "decision_id": "DEC-SEPARATE-001",
+                "invocation_id": "INV-WORKER-SEPARATE",
+                "parent_invocation_id": "INV-ROOT-SEPARATE",
+                "root_invocation_id": "INV-ROOT-SEPARATE",
+                "trigger_mail_uid": 1,
+            }
+            question_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-SEPARATE-001] [DEC-SEPARATE-001] QUESTION Q010",
+                json.dumps(
+                    {
+                        **worker_payload,
+                        "message_type": "QUESTION",
+                        "invocation_result": "WAITING",
+                        "status": "WAITING_FOR_DECISION",
+                    }
+                ),
+            )
+            initial = JobRecord(
+                "JOB-SEPARATE-001",
+                1,
+                human_uid,
+                worker_uid,
+                commander_uid,
+                "DEC-SEPARATE-001",
+                JobState.WAITING_FOR_WORKER,
+                expected_worker_parent_invocation_id="INV-ROOT-SEPARATE",
+                expected_worker_trigger_mail_uid=1,
+            )
+            first_env = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-QUESTION",
+                "INVOCATION_ID": "INV-DIRECTOR-QUESTION",
+                "AI_PARENT_INVOCATION_ID": "INV-WORKER-SEPARATE",
+                "AI_ROOT_INVOCATION_ID": "INV-ROOT-SEPARATE",
+                "AI_TRIGGER_MAIL_UID": str(question_id),
+            }
+            with patch.dict(os.environ, first_env, clear=False):
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                engine.jobs.save(initial)
+                self.assertEqual(engine.process_once(), 1)
+            self.assertEqual(
+                engine.jobs.load("JOB-SEPARATE-001").latest_invocation_result,
+                InvocationResult.DELEGATED,
+            )
+
+            waiting_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-SEPARATE-001] [DEC-SEPARATE-001] STATUS: WAITING_FOR_DECISION",
+                json.dumps(
+                    {
+                        **worker_payload,
+                        "invocation_result": "WAITING",
+                        "status": "WAITING_FOR_DECISION",
+                    }
+                ),
+            )
+            second_env = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-WAITING",
+                "INVOCATION_ID": "INV-DIRECTOR-WAITING",
+                "AI_PARENT_INVOCATION_ID": "INV-WORKER-SEPARATE",
+                "AI_ROOT_INVOCATION_ID": "INV-ROOT-SEPARATE",
+                "AI_TRIGGER_MAIL_UID": str(waiting_id),
+            }
+            with patch.dict(os.environ, second_env, clear=False):
+                waiting_engine = DirectorEngine(
+                    root, mail=mail, config_path=root / "missing.json"
+                )
+                self.assertEqual(waiting_engine.process_once(), 1)
+
+            record = waiting_engine.jobs.load("JOB-SEPARATE-001")
+            self.assertEqual(record.state, JobState.DECISION_PENDING)
+            noop = next(m for m in mail.messages if m["mail_id"] == record.result_mail_uid)
+            noop_payload = json.loads(noop["body"])
+            self.assertEqual(noop_payload["invocation_id"], "INV-DIRECTOR-WAITING")
+            self.assertEqual(noop_payload["invocation_result"], "COMPLETED")
+            self.assertFalse(noop_payload["task_eligible"])
+
+    def test_wrong_inbound_invocation_fails_without_corrupting_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            worker_uid = mail.register_user("claude_worker")
+            commander_uid = mail.register_user("codex_commander")
+            human_uid = mail.register_user("human_controller")
+            bad_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-WRONG-001] [DEC-WRONG-001] QUESTION",
+                json.dumps(
+                    {
+                        "message_type": "QUESTION",
+                        "task_eligible": True,
+                        "status": "WAITING_FOR_DECISION",
+                        "invocation_result": "WAITING",
+                        "job_id": "JOB-WRONG-001",
+                        "decision_id": "DEC-WRONG-001",
+                        "invocation_id": "INV-WRONG",
+                        "parent_invocation_id": "INV-ROOT",
+                        "root_invocation_id": "INV-ROOT",
+                        "trigger_mail_uid": 1,
+                    }
+                ),
+            )
+            environment = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-WRONG",
+                "INVOCATION_ID": "INV-DIRECTOR-WRONG",
+                "AI_PARENT_INVOCATION_ID": "INV-EXPECTED",
+                "AI_ROOT_INVOCATION_ID": "INV-ROOT",
+                "AI_TRIGGER_MAIL_UID": str(bad_id),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                engine.jobs.save(
+                    JobRecord(
+                        "JOB-WRONG-001", 1, human_uid, worker_uid,
+                        commander_uid, "DEC-WRONG-001", JobState.WAITING_FOR_WORKER,
+                        parent_invocation_id="INV-ORIGINAL-PARENT",
+                        root_invocation_id="INV-ROOT",
+                        trigger_mail_uid=1,
+                        expected_worker_parent_invocation_id="INV-ROOT",
+                        expected_worker_trigger_mail_uid=1,
+                        active_worker_invocation_id="INV-EXPECTED",
+                    )
+                )
+                self.assertEqual(engine.process_once(), 1)
+                retry_engine = DirectorEngine(
+                    root, mail=mail, config_path=root / "missing.json"
+                )
+                self.assertEqual(retry_engine.process_once(), 1)
+                retried_record = retry_engine.jobs.load("JOB-WRONG-001")
+                retried_payload = json.loads(
+                    next(
+                        message["body"]
+                        for message in mail.messages
+                        if message["mail_id"] == retried_record.result_mail_uid
+                    )
+                )
+                self.assertEqual(retried_payload["invocation_result"], "FAILED")
+                self.assertEqual(retried_record.state, JobState.WAITING_FOR_WORKER)
+            forged_parent_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-WRONG-001] [DEC-WRONG-001] QUESTION forged parent",
+                json.dumps(
+                    {
+                        "message_type": "QUESTION",
+                        "task_eligible": True,
+                        "status": "WAITING_FOR_DECISION",
+                        "invocation_result": "WAITING",
+                        "job_id": "JOB-WRONG-001",
+                        "decision_id": "DEC-WRONG-001",
+                        "invocation_id": "INV-EXPECTED",
+                        "parent_invocation_id": "INV-FOREIGN-PARENT",
+                        "root_invocation_id": "INV-ROOT",
+                        "trigger_mail_uid": 1,
+                    }
+                ),
+            )
+            forged_environment = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-FORGED",
+                "INVOCATION_ID": "INV-DIRECTOR-FORGED",
+                "AI_PARENT_INVOCATION_ID": "INV-EXPECTED",
+                "AI_ROOT_INVOCATION_ID": "INV-ROOT",
+                "AI_TRIGGER_MAIL_UID": str(forged_parent_id),
+            }
+            with patch.dict(os.environ, forged_environment, clear=False):
+                forged_engine = DirectorEngine(
+                    root, mail=mail, config_path=root / "missing.json"
+                )
+                self.assertEqual(forged_engine.process_once(), 1)
+            record = forged_engine.jobs.load("JOB-WRONG-001")
+            self.assertEqual(record.state, JobState.WAITING_FOR_WORKER)
+            self.assertEqual(record.last_inbound_invocation_id, "")
+            self.assertEqual(record.latest_invocation_result, InvocationResult.FAILED)
+            self.assertEqual(record.parent_invocation_id, "INV-ORIGINAL-PARENT")
+            self.assertEqual(record.root_invocation_id, "INV-ROOT")
+            self.assertEqual(record.trigger_mail_uid, 1)
+
+    def test_duplicate_question_uses_lowest_mail_uid_without_reopening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            (root / "QandA.md").write_text(
+                """# QandA.md
+
+## Q010
+- Status: OPEN
+- Request-ID: JOB-DUPLICATE-001
+- From: claude_worker
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: Which encoding?
+- Proposed-Answer: UTF-8
+- Evidence: test
+""",
+                encoding="utf-8",
+            )
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            worker_uid = mail.register_user("claude_worker")
+            commander_uid = mail.register_user("codex_commander")
+            human_uid = mail.register_user("human_controller")
+            payload = {
+                "message_type": "QUESTION",
+                "task_eligible": True,
+                "status": "WAITING_FOR_DECISION",
+                "invocation_result": "WAITING",
+                "job_id": "JOB-DUPLICATE-001",
+                "decision_id": "DEC-DUPLICATE-001",
+                "invocation_id": "INV-WORKER-DUPLICATE",
+                "parent_invocation_id": "INV-DIRECTOR-ROOT",
+                "root_invocation_id": "INV-DIRECTOR-ROOT",
+                "trigger_mail_uid": 1,
+            }
+            first_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-DUPLICATE-001] [DEC-DUPLICATE-001] QUESTION Q010",
+                json.dumps(payload),
+            )
+            initial = JobRecord(
+                "JOB-DUPLICATE-001",
+                1,
+                human_uid,
+                worker_uid,
+                commander_uid,
+                "DEC-DUPLICATE-001",
+                JobState.WAITING_FOR_WORKER,
+                expected_worker_parent_invocation_id="INV-DIRECTOR-ROOT",
+                expected_worker_trigger_mail_uid=1,
+            )
+            first_env = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-FIRST",
+                "INVOCATION_ID": "INV-DIRECTOR-FIRST",
+                "AI_PARENT_INVOCATION_ID": "INV-WORKER-DUPLICATE",
+                "AI_ROOT_INVOCATION_ID": "INV-DIRECTOR-ROOT",
+                "AI_TRIGGER_MAIL_UID": str(first_id),
+            }
+            with patch.dict(os.environ, first_env, clear=False):
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                engine.jobs.save(initial)
+                self.assertEqual(engine.process_once(), 1)
+
+            second_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-DUPLICATE-001] [DEC-DUPLICATE-001] QUESTION Q010 duplicate",
+                json.dumps(payload),
+            )
+            second_env = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-SECOND",
+                "INVOCATION_ID": "INV-DIRECTOR-SECOND",
+                "AI_PARENT_INVOCATION_ID": "INV-WORKER-DUPLICATE",
+                "AI_ROOT_INVOCATION_ID": "INV-DIRECTOR-ROOT",
+                "AI_TRIGGER_MAIL_UID": str(second_id),
+            }
+            with patch.dict(os.environ, second_env, clear=False):
+                duplicate_engine = DirectorEngine(
+                    root, mail=mail, config_path=root / "missing.json"
+                )
+                self.assertEqual(duplicate_engine.process_once(), 1)
+
+            record = duplicate_engine.jobs.load("JOB-DUPLICATE-001")
+            self.assertEqual(record.state, JobState.DECISION_PENDING)
+            self.assertIn(first_id, record.inbound_result_mail_uids.values())
+            decision_requests = [
+                json.loads(message["body"])
+                for message in mail.messages
+                if message["recipient_uid"] == commander_uid
+                and message["body"].lstrip().startswith("{")
+                and json.loads(message["body"]).get("message_type")
+                == "DECISION_REQUEST"
+            ]
+            self.assertEqual(len(decision_requests), 1)
+
+    def test_late_completion_does_not_reopen_terminal_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            worker_uid = mail.register_user("claude_worker")
+            commander_uid = mail.register_user("codex_commander")
+            human_uid = mail.register_user("human_controller")
+            late_id = mail.send_mail(
+                worker_uid,
+                director_uid,
+                "[JOB-LATE-001] [DEC-LATE-001] STATUS: COMPLETED",
+                json.dumps(
+                    {
+                        "message_type": "INVOCATION_RESULT",
+                        "task_eligible": True,
+                        "status": "COMPLETED",
+                        "invocation_result": "COMPLETED",
+                        "job_id": "JOB-LATE-001",
+                        "decision_id": "DEC-LATE-001",
+                        "invocation_id": "INV-WORKER-LATE",
+                        "parent_invocation_id": "INV-DIRECTOR-ROOT",
+                        "root_invocation_id": "INV-DIRECTOR-ROOT",
+                        "trigger_mail_uid": 1,
+                        "artifacts": [],
+                    }
+                ),
+            )
+            environment = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-LATE",
+                "INVOCATION_ID": "INV-DIRECTOR-LATE",
+                "AI_PARENT_INVOCATION_ID": "INV-WORKER-LATE",
+                "AI_ROOT_INVOCATION_ID": "INV-DIRECTOR-ROOT",
+                "AI_TRIGGER_MAIL_UID": str(late_id),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                engine.jobs.save(
+                    JobRecord(
+                        "JOB-LATE-001",
+                        1,
+                        human_uid,
+                        worker_uid,
+                        commander_uid,
+                        "DEC-LATE-001",
+                        JobState.COMPLETED,
+                        expected_worker_parent_invocation_id="INV-DIRECTOR-ROOT",
+                        expected_worker_trigger_mail_uid=1,
+                        active_worker_invocation_id="INV-WORKER-LATE",
+                    )
+                )
+                self.assertEqual(engine.process_once(), 1)
+            record = engine.jobs.load("JOB-LATE-001")
+            self.assertEqual(record.state, JobState.COMPLETED)
+            self.assertEqual(record.latest_invocation_result, InvocationResult.COMPLETED)
+
+    def test_exact_trigger_retry_recovers_already_read_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            director_uid = mail.register_user("director")
+            human_uid = mail.register_user("human_controller")
+            trigger_id = mail.send_mail(
+                human_uid,
+                director_uid,
+                "[JOB-RETRY-001] [DEC-RETRY-001] request",
+                "safe task",
+            )
+            environment = {
+                "AI_INVOCATION_ID": "INV-DIRECTOR-RETRY",
+                "INVOCATION_ID": "INV-DIRECTOR-RETRY",
+                "AI_ROOT_INVOCATION_ID": "INV-DIRECTOR-RETRY",
+                "AI_TRIGGER_MAIL_UID": str(trigger_id),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+                self.assertEqual(engine.process_once(), 1)
+                retry_engine = DirectorEngine(
+                    root, mail=mail, config_path=root / "missing.json"
+                )
+                self.assertEqual(retry_engine.process_once(), 1)
+            record = retry_engine.jobs.load("JOB-RETRY-001")
+            self.assertEqual(record.state, JobState.WAITING_FOR_WORKER)
+
+    def test_director_rejects_conflicting_invocation_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            with patch.dict(
+                os.environ,
+                {"AI_INVOCATION_ID": "INV-A", "INVOCATION_ID": "INV-B"},
+                clear=False,
+            ):
+                with self.assertRaises(DirectorError):
+                    DirectorEngine(root, mail=FakeMail(), config_path=root / "missing.json")
+
+    def test_missing_exact_trigger_is_an_explicit_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            environment = {
+                "AI_INVOCATION_ID": "INV-MISSING-TRIGGER",
+                "INVOCATION_ID": "INV-MISSING-TRIGGER",
+                "AI_ROOT_INVOCATION_ID": "INV-MISSING-TRIGGER",
+                "AI_TRIGGER_MAIL_UID": "999",
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                engine = DirectorEngine(
+                    root, mail=FakeMail(), config_path=root / "missing.json"
+                )
+                with self.assertRaises(DirectorError):
+                    engine.process_once()
 
     def test_qanda_strict_parse_and_answer_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -267,9 +860,24 @@ class DirectorUnitTests(unittest.TestCase):
             mail.send_mail(timeout_human, timeout_engine.uid, "[JOB-TIMEOUT-001] [DEC-TIMEOUT-001] request", "safe task")
             timeout_engine.process_once()
             orchestrator = mail.register_user("orchestrator")
-            mail.send_mail(orchestrator, timeout_engine.uid, "[JOB-TIMEOUT-001][TIMEOUT] claude_designer", "status: TIMED_OUT\njob_id: JOB-TIMEOUT-001")
+            mail.send_mail(
+                orchestrator,
+                timeout_engine.uid,
+                "[JOB-TIMEOUT-001][TIMEOUT] claude_designer",
+                json.dumps(
+                    {
+                        "message_type": "SYSTEM_ALERT",
+                        "task_eligible": False,
+                        "status": "TIMED_OUT",
+                        "job_id": "JOB-TIMEOUT-001",
+                    }
+                ),
+            )
             timeout_engine.process_once()
-            self.assertEqual(timeout_engine.jobs.load("JOB-TIMEOUT-001").state, JobState.HUMAN_REQUIRED)
+            self.assertEqual(
+                timeout_engine.jobs.load("JOB-TIMEOUT-001").state,
+                JobState.WAITING_FOR_WORKER,
+            )
 
 
 if __name__ == "__main__":

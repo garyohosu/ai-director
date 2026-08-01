@@ -40,6 +40,24 @@
 | （任意のキー状態） | 存在（空文字 `""`） | **送信せずエラー (exit 1)** |
 | どちらも存在しない | どちらも存在しない | ・通常モード: **送信せずエラー (exit 1)**<br>・互換モード (`AI_ALLOW_MISSING_INVOCATION_ID=1`): `MANUAL-<完全なUUID4>` を生成して使用。 |
 
+## フェーズ2: 第三者転送時の終端結果
+
+- `DirectorState` と `InvocationResult` を分離する。
+- 結果は `COMPLETED`、`DELEGATED`、`WAITING`、`FAILED` のいずれかとする。
+- `DECISION_REQUEST` を第三者AIへ送信した場合、起点Invocationは
+  `DELEGATED` として正常終了できる。
+- 本文JSONの `invocation_id`、`parent_invocation_id`、
+  `root_invocation_id`、`trigger_mail_uid` を相関の正本とし、メール宛先や
+  件名だけから終了を推測しない。
+- 結果メールは送信後に得た実メールIDを `result_mail_uid` として状態・ログへ
+  保存する。複数の有効な結果がある場合は最小メールIDを正本とし、後続は重複
+  診断として記録する。
+- タイムアウト境界では有限のgrace期間だけ最終照会し、その範囲で届いた正しい
+  結果は採用する。終端確定後の遅延返信は状態を再オープンしない。
+- Directorはworker/commanderへ発行した子タスクの親Invocationと実メールIDを
+  永続化し、受信したparent/triggerをその発行済み関係と照合する。誤相関結果は
+  Job状態を終端化せず、当該Director Invocationだけを失敗として隔離する。
+
 ---
 
 ## 3. インターフェースとデータ構造

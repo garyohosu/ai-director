@@ -359,3 +359,26 @@ directorが参照する正式仕様（本SPEC.md、mail/SPEC.md、orchestrator/S
 6. Codex CLI がレビュー結果を返信。
 7. 指摘があれば director が Claude Code へ REVISE 指示。
 8. APPROVED に達したら COMPLETE と判定して報告。
+
+## 18. Invocation の状態と関連付け
+
+- Director内部の進行状態 (`DirectorState`) と、一回のCLI起動結果
+  (`InvocationResult`) は別の値として管理する。
+- `InvocationResult` は `COMPLETED`、`DELEGATED`、`WAITING`、`FAILED`
+  のいずれかとする。別AIへ `DECISION_REQUEST` を送信できた起動は、元の
+  Invocationを `DELEGATED` として正常に終了する。
+- 起動と結果メールの関連付けは、本文JSONの `invocation_id`、
+  `parent_invocation_id`、`root_invocation_id`、`trigger_mail_uid` を正本とする。
+  件名や宛先は表示・配送用であり、Invocation終了判定の正本にしない。
+- `result_mail_uid` は送信後に確定した実メールIDを状態へ保存する。本文内に
+  自己参照値として埋め込まない。
+- `AI_TRIGGER_MAIL_UID` が指定された起動では、そのメールだけを受信・処理し、
+  同じ受信者の他の未読メールを消費しない。
+- worker/commanderへ発行した子タスクごとに、送信元Director Invocationと実際の
+  送信メールIDを期待する `parent_invocation_id` / `trigger_mail_uid` として保存する。
+  受信結果は起動環境との自己一致だけでなく、この発行済み関係とも一致しなければ
+  ならない。最初の有効結果で子Invocationを固定し、同一InvocationのQUESTIONと
+  WAITINGだけを同じ子処理として扱う。
+- 誤ったInvocation相関のメールは現在のDirectorStateを変更せず、そのDirector
+  Invocationだけを`FAILED`として終了する。拒否したメールIDと理由を保存し、同じ
+  triggerの再試行でも`COMPLETED`へ反転させず`FAILED`を再現する。

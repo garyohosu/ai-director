@@ -47,7 +47,44 @@
 
 ## フェーズ2: 第三者転送の正常終了
 
-- 未着手。
+### 調査結果・判断理由
+
+- 再起動時点の未コミット実装は第三者宛`DELEGATED`を認識できたが、Directorの
+  重複QUESTION、終端後の遅延返信、既読trigger再試行で状態破損または例外終了を
+  再現したため、そのままコミットしなかった。
+- 本文JSONを正本としつつ、同じ本文から作られる起動環境との自己一致だけではなく、
+  Directorが実際に発行した子タスクの親Invocationと送信メールIDを照合する。
+- 誤相関はJobを`HUMAN_REQUIRED`へ変更せず、当該Director Invocationだけを
+  `FAILED`として隔離する。拒否triggerの再試行でも結果を`FAILED`に固定する。
+
+### 変更ファイル
+
+- director: `director.py`, `state_machine.py`, `ids.py`, `agent_reply.py`,
+  `SPEC.md`, `tests/test_agent_reply.py`, `tests/test_minimal_loop.py`,
+  `real04_mitigation_design.md`。
+- orchestrator: `invocation.py`, `dispatch.py`, `launcher.py`, `mail_adapter.py`,
+  `runtime.py`, `logging_utils.py`, `orchestrator.py`, `SPEC.md`, `TESTCASE.md`,
+  関連テストとfake。
+- mail: `receive_mail(uid, mail_id=...)`の原子的な単一メール受信、仕様、テスト。
+
+### テスト結果
+
+- director: 48件成功。
+- orchestrator: 160件成功。
+- mail: 61件成功。
+- 3リポジトリの`compileall`、`git diff --check`、`git diff --cached --check`成功。
+- 正常、第三者DELEGATED、重複結果の最小メールID、遅延返信、誤Invocation、
+  forged parent/trigger、タイムアウト境界、既読trigger再試行を確認した。
+- 独立レビューで、root parentの`null`契約、空decision_id照合、Subjectを正本に
+  しない照合、発行済み子タスクとの相関、拒否triggerの結果反転を追加修正した。
+
+### コミットID
+
+- コミット作成後に追記する。
+
+### 残課題
+
+- Phase 2としてなし。`SYSTEM_ALERT/task_eligible=false`の起動除外はPhase 3で行う。
 
 ## フェーズ3: 制御通知による誤起動防止
 
