@@ -249,3 +249,49 @@
 - 独立レビューはP0/P1なし、R4-ready判定。指摘された巨大整数の`float()`変換時の
   `OverflowError`漏れも`DecisionError`へ正規化し、数値LOW閾値を依頼payloadへ追記した。
 - クリーンな実行状態でREAL04-R4を実行する。
+
+### 試行3修正コミット
+
+- ai-director: `6ad0b39` (`fix: accept documented decision confidence`)
+
+### 試行4（REAL04-R4）
+
+- 実行: 2026-08-01 16:13–16:17 JST
+  （`JOB-20260801T071255Z-REAL04-R4`）。
+- 使用AI: Director=`director`、作業AI=`claude_designer`（Claude Code）、
+  指揮AI=`codex_reviewer`（Codex CLI）。
+- mail 1起点、mail 3初回Claude TASK、mail 5 ACK、mail 6新規Q014、
+  mail 7製品reporterのWAITING、mail 8 Codex判断依頼まで正常に進んだ。
+- Invocation系譜:
+  - root/Director: `INV-20260801T071329782Z-001-97DDAFEF-38B2-4E2F-9A43-C59933C15F2C`
+    （trigger mail 1、result mail 4、WAITING）
+  - Claude: `INV-20260801T071330234Z-001-9C5CEDFE-EF00-44DC-A618-BDC5CFBF4297`
+    （parent=root、trigger mail 3、result mail 7、WAITING）
+  - question Director: `INV-20260801T071705734Z-001-0CFD5525-1C7B-458A-8483-835FCAEA6F7F`
+    （parent=Claude、trigger mail 6、result mail 8、DELEGATED）
+  - Codex: `INV-20260801T071706207Z-001-35681D43-1C45-42CB-BB8B-AC7FB5EE768A`
+    （parent=question Director、trigger mail 8、回答前にCLI exit 1）
+- Codex CLI stderrは`You've hit your usage limit`と、次回利用可能時刻
+  `Aug 8th, 2026 12:37 PM`を明示した。製品コードや判断schemaの失敗ではなく、
+  外部AI利用量制限である。orchestratorはmail 9を`SYSTEM_ALERT`かつ
+  `task_eligible=false`として一度だけ生成し、Directorの新規AIタスクとして起動しなかった。
+- 成果物作成・Q014回答・最終COMPLETEDには未到達であり、試行4も成功扱いにしない。
+  `stop.request`で新規起動を安全停止し、全証跡を
+  `director/records/_real04_runtime_20260801_R4`へ保存した。
+- ClaudeがQandA.mdを誤った文字コードで再保存したため、破損原本をR4証跡へ保存した後、
+  liveファイルをR3 UTF-8正本から復元し、未回答Q014を同義のUTF-8テキストで再構築した。
+  Knowledge Indexも復元後の正本から再生成した。
+
+### 停止条件
+
+- 指定停止条件7「使用量制限に達した」に該当する。試行回数は4/6だが、同じCodex CLIを
+  再実行しても外部制限時刻まで成功不能なため、R5/R6は実行しない。
+- 制限解除後は、CLI利用可能性を確認し、R4証跡を保持したまま新しいJob/Decisionで
+  クリーンなmail DBから再実行する。製品修正コミットのpushは行っていない。
+
+### 停止時の最終検証
+
+- ai-director: 全60件成功、compileall成功、`git diff --check`成功。
+- ai-orchestrator: 全165件成功、compileall成功、`git diff --check`成功。
+- aiagent-mail: 全61件成功、compileall成功、`git diff --check`成功。
+- REAL04-R4の成果物は未作成、Q014はOPENであり、成功として記録していない。

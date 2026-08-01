@@ -1,12 +1,12 @@
 ---
-source_commit: "1fa84bb518bd20d99c24ae3a328cce8cedea7e08"
-generated_at: "2026-07-31T07:31:34Z"
+source_commit: "6ad0b3923cde2bde4cd1de75e2d4ad55690edb21"
+generated_at: "2026-08-01T07:20:15Z"
 source_files:
   - director/SPEC.md
   - QandA.md
 source_sha256:
-  director/SPEC.md: bf35d3071169ece1868f34ee69c171105e2175c913a5ae48795534ff4f391d82
-  QandA.md: 99adb3d32680f23a4f8c80835795c9f3654977c0fba2d79350ad35ba54198b4c
+  director/SPEC.md: 351c20d791b2fa1631e6e42492ab991138f657f4dde3425a73d2505e44f235d6
+  QandA.md: 183d47f5e790db7fe57a6475d5858aece8edd8f8ad26f38ff589c6276aa6ed39
 ---
 # Decisions
 
@@ -20,3 +20,5 @@ QandA.mdでANSWEREDになった正式判断の索引。内容の正本は必ずQ
 - [Q006](../../QandA.md#q006): Question: 成果物ファイルは末尾改行なしの一行で作成してよいですか？
 - [Q007](../../QandA.md#q007): Question: 成果物は指定文字列の一行を末尾改行なしで作成してよいですか？
 - [Q009](../../QandA.md#q009): Question: director Python CLIをorchestratorの一つのInvocationとして起動した場合、処理済みを示すInvocation-ID付き終端通知をdirectorが送信する契約にするか、orchestratorがdirector専用のstdout成功契約を検証するか？
+- [Q011](../../QandA.md#q011): Question: 成果物 director/tests/artifacts/real04_result.txt の文字コードはUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにしますか?
+- [Q012](../../QandA.md#q012): Question: 本R2受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)とUTF-8(BOMあり)のどちらにするか、(b)末尾改行を付けないことを確定してよいか、(c)結果として全体バイト長を厳密に25バイトとしてよいか、の3点の確定回答をください。
