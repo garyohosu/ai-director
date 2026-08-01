@@ -278,9 +278,9 @@
 - 成果物作成・Q014回答・最終COMPLETEDには未到達であり、試行4も成功扱いにしない。
   `stop.request`で新規起動を安全停止し、全証跡を
   `director/records/_real04_runtime_20260801_R4`へ保存した。
-- ClaudeがQandA.mdを誤った文字コードで再保存したため、破損原本をR4証跡へ保存した後、
-  liveファイルをR3 UTF-8正本から復元し、未回答Q014を同義のUTF-8テキストで再構築した。
-  Knowledge Indexも復元後の正本から再生成した。
+- PowerShell表示上でQandA.mdが文字化けして見えたためR4実行原本を先に証跡保存した。
+  独立レビューのbyte検証では原本はBOM/U+FFFDのない正しいUTF-8だったため、R4原本を
+  byte-exactでliveへ戻し、Knowledge Indexをその正本から再生成した。実ファイル破損はなかった。
 
 ### 停止条件
 
@@ -295,3 +295,7 @@
 - ai-orchestrator: 全165件成功、compileall成功、`git diff --check`成功。
 - aiagent-mail: 全61件成功、compileall成功、`git diff --check`成功。
 - REAL04-R4の成果物は未作成、Q014はOPENであり、成功として記録していない。
+- 独立事後レビューはP0/P1なし。usage-limit証跡、全Invocation系譜、mail 9の一回限りの
+  非起動、未読維持、Jobの`DECISION_PENDING`、成果物なしが相互に整合すると確認した。
+- Phase 4停止記録コミット: ai-director `5e2d321`
+  (`chore: record REAL04 usage limit stop`)。pushは実施していない。

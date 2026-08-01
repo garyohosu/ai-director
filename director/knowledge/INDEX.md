@@ -1,12 +1,12 @@
 ---
-source_commit: "6ad0b3923cde2bde4cd1de75e2d4ad55690edb21"
-generated_at: "2026-08-01T07:20:15Z"
+source_commit: "5e2d321535f15db232aa414c13fb708071da8953"
+generated_at: "2026-08-01T07:24:49Z"
 source_files:
   - director/SPEC.md
   - QandA.md
 source_sha256:
   director/SPEC.md: 351c20d791b2fa1631e6e42492ab991138f657f4dde3425a73d2505e44f235d6
-  QandA.md: 183d47f5e790db7fe57a6475d5858aece8edd8f8ad26f38ff589c6276aa6ed39
+  QandA.md: f2e28837661474bbfa28e94d44c2c2ad3c46963a8b82e933a00f0cbb1f48201d
 ---
 # Knowledge Index
 
