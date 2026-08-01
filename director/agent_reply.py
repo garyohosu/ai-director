@@ -24,6 +24,28 @@ _SECRET_MARKERS = (
     "authorization",
 )
 _QANDA_ID_RE = re.compile(r"^Q[0-9]{3,}$")
+# Correlation and structural fields are the authoritative record body contract
+# (real04_mitigation_design.md 「本文メタデータが正本」). They are never
+# redacted: masking them would break invocation correlation and make a correct
+# reply look like NO_REPLY.
+_PROTECTED_KEYS = frozenset(
+    {
+        "message_type",
+        "task_eligible",
+        "status",
+        "job_id",
+        "decision_id",
+        "invocation_id",
+        "parent_invocation_id",
+        "root_invocation_id",
+        "trigger_mail_uid",
+        "invocation_result",
+        "agent_uid",
+        "qanda_ids",
+        "path",
+        "sha256",
+    }
+)
 
 
 def _load_mail_module(project_root: Path):
@@ -55,6 +77,46 @@ def mask_secrets(data: str) -> str:
         else:
             lines_out.append(line)
     return "\n".join(lines_out)
+
+
+def _mask_value(value):
+    if isinstance(value, str):
+        return mask_secrets(value)
+    if isinstance(value, list):
+        return [_mask_value(item) for item in value]
+    if isinstance(value, dict):
+        return mask_structured_payload(value)
+    return value
+
+
+def mask_structured_payload(payload: dict) -> dict:
+    """Redact secrets inside a result body without breaking its JSON shape.
+
+    Masking the serialized text would replace whole ``"key": "value"`` lines
+    with a bare marker, leaving a body that no longer parses. Orchestrator
+    treats an unparsable body as "no structured payload", so a correct reply
+    would be scored as NO_REPLY -- the exact REAL04 failure this design
+    exists to prevent. Redaction therefore happens on values, before dumping.
+    """
+
+    masked: dict = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and key in _PROTECTED_KEYS:
+            masked[key] = value
+            continue
+        if isinstance(key, str) and any(
+            marker in key.lower() for marker in _SECRET_MARKERS
+        ):
+            masked[key] = "[REDACTED_SECRET_VALUE]"
+            continue
+        masked[key] = _mask_value(value)
+    return masked
+
+
+def dump_masked_body(payload: dict) -> str:
+    """Serialize a result body with secrets redacted and JSON kept valid."""
+
+    return json.dumps(mask_structured_payload(payload), ensure_ascii=False, indent=2)
 
 
 def validate_and_read_result_file(project_root: Path, file_path_str: str) -> dict:
@@ -322,9 +384,7 @@ def main() -> int:
             "agent_uid": agent_uid,
             "message": "Task instruction accepted and processing started.",
         }
-        body_text = mask_secrets(
-            json.dumps(body_dict, ensure_ascii=False, indent=2)
-        )
+        body_text = dump_masked_body(body_dict)
         mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
         state_file.write_text(json.dumps({"status": "ACK_RECEIVED", "updated_at": subject}), encoding="utf-8")
         print(f"ACK sent to {reply_to_uid}")
@@ -348,7 +408,7 @@ def main() -> int:
         payload["root_invocation_id"] = invocation_metadata.root_invocation_id
         payload["trigger_mail_uid"] = invocation_metadata.trigger_mail_uid
         payload["invocation_result"] = "WAITING"
-        body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
+        body_text = dump_masked_body(payload)
         mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
         state_file.write_text(json.dumps({"status": "WAITING_FOR_DECISION", "updated_at": subject}), encoding="utf-8")
         print(f"Report WAITING_FOR_DECISION sent to {reply_to_uid}")
@@ -371,7 +431,7 @@ def main() -> int:
         "COMPLETED" if args.action == "complete" else "FAILED"
     )
 
-    body_text = mask_secrets(json.dumps(payload, ensure_ascii=False, indent=2))
+    body_text = dump_masked_body(payload)
     mail.send_mail(agent_uid, reply_to_uid, subject, body_text, **kwargs)
     state_file.write_text(json.dumps({"status": status_code, "updated_at": subject}), encoding="utf-8")
     print(f"Report {status_code} sent to {reply_to_uid}")

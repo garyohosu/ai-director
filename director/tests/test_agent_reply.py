@@ -11,7 +11,12 @@ import sys
 
 from director.tests import helper
 
-from director.agent_reply import validate_and_read_result_file, validate_wait_payload, mask_secrets
+from director.agent_reply import (
+    dump_masked_body,
+    validate_and_read_result_file,
+    validate_wait_payload,
+    mask_secrets,
+)
 from director.ids import (
     InvocationIdError,
     new_manual_invocation_id,
@@ -33,6 +38,52 @@ class TestAgentReply(unittest.TestCase):
         masked = mask_secrets(sample)
         self.assertIn("[REDACTED_SECRET_LINE]", masked)
         self.assertIn("normal_line=hello", masked)
+
+    def test_masked_body_stays_valid_json_when_text_mentions_secrets(self):
+        # A worker summary mentioning a secret marker must not corrupt the
+        # body: orchestrator reads the body JSON as the authoritative
+        # invocation record, and an unparsable body is scored as NO_REPLY.
+        payload = {
+            "status": "COMPLETED",
+            "job_id": "JOB-TEST",
+            "decision_id": "DEC-TEST",
+            "invocation_id": "INV-TEST-001",
+            "parent_invocation_id": None,
+            "root_invocation_id": "INV-TEST-001",
+            "trigger_mail_uid": 3,
+            "invocation_result": "COMPLETED",
+            "summary": "Documented the authorization flow: see notes",
+        }
+        body = dump_masked_body(payload)
+        parsed = json.loads(body)
+        self.assertEqual(parsed["invocation_id"], "INV-TEST-001")
+        self.assertEqual(parsed["job_id"], "JOB-TEST")
+        self.assertEqual(parsed["decision_id"], "DEC-TEST")
+        self.assertIsNone(parsed["parent_invocation_id"])
+        self.assertEqual(parsed["root_invocation_id"], "INV-TEST-001")
+        self.assertEqual(parsed["trigger_mail_uid"], 3)
+        self.assertEqual(parsed["invocation_result"], "COMPLETED")
+        self.assertIn("[REDACTED_SECRET_LINE]", parsed["summary"])
+
+    def test_masked_body_redacts_secret_keys_and_nested_values(self):
+        payload = {
+            "status": "COMPLETED",
+            "invocation_id": "INV-TEST-002",
+            "api_key": "AKIAEXAMPLE",
+            "artifacts": [
+                {"path": "out.txt", "sha256": "ab12", "note": "token=abc123"}
+            ],
+            "detail": {"password": "hunter2", "safe": "ordinary text"},
+        }
+        parsed = json.loads(dump_masked_body(payload))
+        self.assertEqual(parsed["api_key"], "[REDACTED_SECRET_VALUE]")
+        self.assertEqual(parsed["detail"]["password"], "[REDACTED_SECRET_VALUE]")
+        self.assertEqual(parsed["detail"]["safe"], "ordinary text")
+        self.assertEqual(parsed["artifacts"][0]["note"], "[REDACTED_SECRET_LINE]")
+        # Artifact identity must survive masking so SHA verification still works.
+        self.assertEqual(parsed["artifacts"][0]["path"], "out.txt")
+        self.assertEqual(parsed["artifacts"][0]["sha256"], "ab12")
+        self.assertEqual(parsed["invocation_id"], "INV-TEST-002")
 
     def test_validate_result_file_valid(self):
         art_path = self.root / "artifact.txt"
