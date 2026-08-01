@@ -38,7 +38,8 @@
 
 ### コミットID
 
-- 未作成。
+- ai-director: `db4d769` (`fix: complete invocation id propagation`)
+- ai-orchestrator: `437d139` (`fix: enforce structured invocation correlation`)
 
 ### 残課題
 
