@@ -384,3 +384,17 @@ directorが参照する正式仕様（本SPEC.md、mail/SPEC.md、orchestrator/S
   triggerの再試行でも`COMPLETED`へ反転させず`FAILED`を再現する。
 - `message_type=SYSTEM_ALERT`または`task_eligible=false`の本文JSONは制御通知として
   扱い、誤ってDirectorが起動された場合もJobを委任・再開しない。
+- commander回答からworkerを再開するときは、worker向けTASKに新しいDecision-IDを
+  割り当てる一方、そのDirector起動の終端`DELEGATED`は起点メールの旧Decision-IDで
+  別メールとして返信する。一通を子TASKと起点Invocation結果に兼用しない。
+- 再開処理は、旧/新Decision-ID、回答、送信元、起点Invocationのparent/root/triggerを
+  含むreplay intentを子TASK送信前に永続化する。子TASK送信後または終端結果送信時に
+  中断しても、Outboxとintentから同じ子メールを回収し、子TASKを重複発行せずに
+  起点Invocation結果を再送できなければならない。
+- 同一Invocation結果の遅延・重複メールは、現在の子タスクの相関ではなく、replay
+  intentに保存した不変の送信元/Invocation/parent/root/triggerで検証する。保存系譜と
+  一つでも異なるメールはreplayしない。
+- 互換モードで`AI_TRIGGER_MAIL_UID`がない場合も、実際に処理したメールIDを
+  `trigger_mail_uid`として保持し、0へ戻さない。
+- worker失敗で人間確認へ遷移する場合、人間向け通知とは別に、起動元へ構造化した
+  `InvocationResult=FAILED`を返信して当該Director Invocationを終端させる。

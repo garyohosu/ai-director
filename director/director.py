@@ -130,12 +130,12 @@ class DirectorEngine:
         self._log("mail_sent", job_id=record.job_id, decision_id=decision_id, mail_id=sent.mail_id, recipient_uid=recipient)
         return int(sent.mail_id or 0)
 
-    def _invocation_metadata(self) -> dict[str, object]:
+    def _invocation_metadata(self, record: JobRecord) -> dict[str, object]:
         return {
             "invocation_id": self.invocation_id,
             "parent_invocation_id": self.parent_invocation_id,
             "root_invocation_id": self.root_invocation_id,
-            "trigger_mail_uid": self.trigger_mail_uid,
+            "trigger_mail_uid": self.trigger_mail_uid or record.trigger_mail_uid,
         }
 
     def _complete_noop(
@@ -151,7 +151,7 @@ class DirectorEngine:
             "invocation_result": InvocationResult.COMPLETED,
             "job_id": record.job_id,
             "decision_id": record.decision_id,
-            **self._invocation_metadata(),
+            **self._invocation_metadata(record),
             "reason": reason,
         }
         result_decision_id = (
@@ -169,6 +169,153 @@ class DirectorEngine:
         self.jobs.save(record)
         return record
 
+    def _replay_invocation_result(
+        self, record: JobRecord, message: dict, replay: dict[str, object]
+    ) -> JobRecord:
+        """Re-emit the original semantic result with this launch's lineage."""
+
+        decision_id = str(replay["decision_id"])
+        invocation_result = str(replay["invocation_result"])
+        payload = {
+            "message_type": "INVOCATION_RESULT",
+            "task_eligible": False,
+            "status": invocation_result,
+            "director_state": replay["director_state"],
+            "invocation_result": invocation_result,
+            "job_id": record.job_id,
+            "decision_id": decision_id,
+            **self._invocation_metadata(record),
+            "delegated_mail_uid": replay["delegated_mail_uid"],
+            "next_decision_id": replay["next_decision_id"],
+            "reason": "replayed persisted invocation result",
+        }
+        result_decision_id = (
+            f"{decision_id}-REPLAY-{int(message['mail_id'])}-{self.invocation_id}"
+        )
+        result_mail_uid = self._send(
+            record,
+            message["sender_uid"],
+            result_decision_id,
+            f"[{record.job_id}] [{decision_id}] [{result_decision_id}] [{self.invocation_id}] STATUS: {invocation_result}",
+            json.dumps(payload, ensure_ascii=False),
+        )
+        record.result_mail_uid = result_mail_uid
+        record.latest_invocation_id = self.invocation_id
+        record.latest_invocation_result = invocation_result
+        self.jobs.save(record)
+        self._log(
+            "invocation_result_replayed",
+            job_id=record.job_id,
+            source_mail_uid=message["mail_id"],
+            result_mail_uid=result_mail_uid,
+            invocation_result=invocation_result,
+            decision_id=decision_id,
+        )
+        return record
+
+    @staticmethod
+    def _resume_replay_lineage(message: dict) -> dict[str, object]:
+        """Capture the immutable inbound lineage used to authenticate replays."""
+
+        try:
+            payload = json.loads(message.get("body", ""))
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        lineage: dict[str, object] = {
+            "source_sender_uid": message["sender_uid"],
+        }
+        if isinstance(payload, dict) and isinstance(payload.get("invocation_id"), str):
+            lineage.update(
+                {
+                    "source_invocation_id": payload.get("invocation_id"),
+                    "source_parent_invocation_id": payload.get(
+                        "parent_invocation_id"
+                    ),
+                    "source_root_invocation_id": payload.get("root_invocation_id"),
+                    "source_trigger_mail_uid": payload.get("trigger_mail_uid"),
+                }
+            )
+        return lineage
+
+    def _continue_resume_delegation(
+        self, record: JobRecord, replay: dict[str, object]
+    ) -> JobRecord:
+        """Idempotently finish the child TASK portion of a resume transaction."""
+
+        delegated_mail_uid = int(replay["delegated_mail_uid"])
+        if delegated_mail_uid > 0:
+            return record
+        next_decision_id = str(replay["next_decision_id"])
+        if record.decision_id not in {str(replay["decision_id"]), next_decision_id}:
+            raise DirectorError("resume replay no longer matches the Director decision")
+        record.decision_id = next_decision_id
+        if record.state != JobState.ANSWER_PENDING:
+            record = record.transition(JobState.ANSWER_PENDING)
+        self.jobs.save(record)
+        packet, size, tokens = self._build_packet(
+            record,
+            f"Resume from checkpoint {record.latest_checkpoint}; use the formal Q&A answer: {replay['answer']}",
+        )
+        resumed_record = record.transition(JobState.WORKER_RESUMED)
+        body = json.dumps(
+            {
+                "message_type": "TASK",
+                "task_eligible": True,
+                "status": "DELEGATED",
+                "director_state": resumed_record.state,
+                "invocation_result": InvocationResult.DELEGATED,
+                "job_id": record.job_id,
+                "decision_id": record.decision_id,
+                "invocation_id": replay["child_invocation_id"],
+                "parent_invocation_id": replay["child_parent_invocation_id"],
+                "root_invocation_id": replay["child_root_invocation_id"],
+                "trigger_mail_uid": replay["child_trigger_mail_uid"],
+                "answer": replay["answer"],
+                "action": "ANSWER",
+                "reason": replay["reason"],
+                "context_packet": packet,
+                "instruction": "Start a new CLI context. Do not repeat the answered question. Send ACK, then COMPLETED or WAITING_FOR_DECISION only if strictly necessary.",
+            },
+            ensure_ascii=False,
+        )
+        delegated_mail_uid = self._send(
+            record,
+            record.current_agent_uid,
+            record.decision_id,
+            f"[{record.job_id}] [{record.decision_id}] [{replay['child_invocation_id']}] ANSWER RESUME",
+            body,
+        )
+        replay["delegated_mail_uid"] = delegated_mail_uid
+        record.latest_invocation_id = self.invocation_id
+        record.latest_invocation_result = InvocationResult.DELEGATED
+        record.expected_worker_parent_invocation_id = str(
+            replay["child_invocation_id"]
+        )
+        record.expected_worker_trigger_mail_uid = delegated_mail_uid
+        record.active_worker_invocation_id = ""
+        resumed_record.latest_invocation_id = record.latest_invocation_id
+        resumed_record.latest_invocation_result = record.latest_invocation_result
+        resumed_record.expected_worker_parent_invocation_id = (
+            record.expected_worker_parent_invocation_id
+        )
+        resumed_record.expected_worker_trigger_mail_uid = delegated_mail_uid
+        resumed_record.active_worker_invocation_id = ""
+        resumed_record.invocation_replay_results = dict(
+            record.invocation_replay_results
+        )
+        # The child can reply immediately. Persist its new correlation before
+        # attempting the separate terminal result for this Director launch.
+        self.jobs.save(resumed_record)
+        self._log(
+            "resume_context_packet",
+            job_id=record.job_id,
+            decision_id=record.decision_id,
+            path=packet,
+            bytes=size,
+            estimated_tokens=tokens,
+        )
+        return resumed_record
+
     def _fail_invocation(
         self, record: JobRecord, message: dict, reason: str
     ) -> JobRecord:
@@ -176,6 +323,9 @@ class DirectorEngine:
 
         mail_key = str(int(message["mail_id"]))
         reason = record.rejected_mail_reasons.setdefault(mail_key, reason)
+        correlation_decision_id = self._failure_correlation_decision(
+            record, message
+        )
         payload = {
             "message_type": "INVOCATION_RESULT",
             "task_eligible": False,
@@ -183,18 +333,18 @@ class DirectorEngine:
             "director_state": record.state,
             "invocation_result": InvocationResult.FAILED,
             "job_id": record.job_id,
-            "decision_id": record.decision_id,
-            **self._invocation_metadata(),
+            "decision_id": correlation_decision_id,
+            **self._invocation_metadata(record),
             "reason": reason,
         }
         result_decision_id = (
-            f"{record.decision_id}-FAILED-{int(message['mail_id'])}-{self.invocation_id}"
+            f"{correlation_decision_id}-FAILED-{int(message['mail_id'])}-{self.invocation_id}"
         )
         record.result_mail_uid = self._send(
             record,
             message["sender_uid"],
             result_decision_id,
-            f"[{record.job_id}] [{record.decision_id}] [{result_decision_id}] [{self.invocation_id}] STATUS: FAILED",
+            f"[{record.job_id}] [{correlation_decision_id}] [{result_decision_id}] [{self.invocation_id}] STATUS: FAILED",
             json.dumps(payload, ensure_ascii=False),
         )
         record.latest_invocation_id = self.invocation_id
@@ -209,6 +359,47 @@ class DirectorEngine:
             error=reason,
         )
         return record
+
+    @staticmethod
+    def _failure_correlation_decision(
+        record: JobRecord, message: dict
+    ) -> str:
+        """Recover an old Decision only from a complete persisted identity.
+
+        A contradictory delayed result must be rejected, not replayed. Its
+        FAILED terminal still has to correlate with the invocation that sent
+        it. An exact persisted event supplies that identity even when its
+        sender is what failed validation. For a semantically contradictory
+        event, status/message type are excluded while the sender and complete
+        immutable Invocation lineage remain mandatory.
+        """
+
+        exact_replay = record.invocation_replay_results.get(
+            DirectorEngine._replay_key_for_message(message)
+        )
+        if exact_replay is not None:
+            return str(exact_replay["decision_id"])
+        try:
+            payload = json.loads(message.get("body", ""))
+        except (TypeError, json.JSONDecodeError):
+            return record.decision_id
+        if not isinstance(payload, dict) or payload.get("job_id") != record.job_id:
+            return record.decision_id
+        inbound_identity = {
+            "source_sender_uid": message.get("sender_uid"),
+            "decision_id": payload.get("decision_id"),
+            "source_invocation_id": payload.get("invocation_id"),
+            "source_parent_invocation_id": payload.get("parent_invocation_id"),
+            "source_root_invocation_id": payload.get("root_invocation_id"),
+            "source_trigger_mail_uid": payload.get("trigger_mail_uid"),
+        }
+        for replay in record.invocation_replay_results.values():
+            persisted_identity = {
+                name: replay.get(name) for name in inbound_identity
+            }
+            if inbound_identity == persisted_identity:
+                return str(replay["decision_id"])
+        return record.decision_id
 
     def _validate_inbound_metadata(
         self, record: JobRecord, message: dict
@@ -278,8 +469,37 @@ class DirectorEngine:
             raise DirectorError("inbound trigger_mail_uid must be positive")
         if payload.get("job_id") != record.job_id:
             raise DirectorError("inbound job_id does not match Director job")
-        if payload.get("decision_id") != record.decision_id:
+        replay = self._replay_for_payload(record, payload)
+        replay_decision_id = replay.get("decision_id") if replay else None
+        inbound_decision_id = payload.get("decision_id")
+        if (
+            inbound_decision_id != record.decision_id
+            and inbound_decision_id != replay_decision_id
+        ):
             raise DirectorError("inbound decision_id does not match Director decision")
+        if replay is not None:
+            if message.get("sender_uid") != replay.get("source_sender_uid"):
+                raise DirectorError(
+                    "replayed result sender does not match persisted lineage"
+                )
+            persisted_lineage = {
+                "invocation_id": replay.get("source_invocation_id"),
+                "parent_invocation_id": replay.get(
+                    "source_parent_invocation_id"
+                ),
+                "root_invocation_id": replay.get("source_root_invocation_id"),
+                "trigger_mail_uid": replay.get("source_trigger_mail_uid"),
+            }
+            inbound_lineage = {
+                "invocation_id": inbound_invocation,
+                "parent_invocation_id": inbound_parent,
+                "root_invocation_id": inbound_root,
+                "trigger_mail_uid": inbound_trigger,
+            }
+            if inbound_lineage != persisted_lineage:
+                raise DirectorError(
+                    "replayed result does not match persisted Invocation lineage"
+                )
         if strict_internal:
             message_type = payload.get("message_type")
             if not isinstance(message_type, str) or not message_type:
@@ -294,7 +514,11 @@ class DirectorEngine:
                 InvocationResult.FAILED,
             }:
                 raise DirectorError("internal agent result has invalid InvocationResult")
-            if message.get("sender_uid") == record.current_agent_uid:
+            if replay is not None:
+                expected_parent = replay.get("source_parent_invocation_id")
+                expected_trigger = replay.get("source_trigger_mail_uid")
+                active_invocation = replay.get("source_invocation_id")
+            elif message.get("sender_uid") == record.current_agent_uid:
                 expected_parent = record.expected_worker_parent_invocation_id
                 expected_trigger = record.expected_worker_trigger_mail_uid
                 active_invocation = record.active_worker_invocation_id
@@ -325,12 +549,36 @@ class DirectorEngine:
         """Return a stable key used to suppress duplicate result mails."""
 
         fields = {
+            "job_id": payload.get("job_id"),
+            "decision_id": payload.get("decision_id"),
             "invocation_id": payload.get("invocation_id"),
+            "parent_invocation_id": payload.get("parent_invocation_id"),
+            "root_invocation_id": payload.get("root_invocation_id"),
+            "trigger_mail_uid": payload.get("trigger_mail_uid"),
             "message_type": payload.get("message_type"),
+            "task_eligible": payload.get("task_eligible"),
             "invocation_result": payload.get("invocation_result"),
             "status": payload.get("status"),
         }
         return json.dumps(fields, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _replay_key_for_message(cls, message: dict) -> str:
+        try:
+            payload = json.loads(message.get("body", ""))
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("invocation_id"), str):
+            return f"event:{cls._inbound_event_key(payload)}"
+        return f"mail:{int(message['mail_id'])}"
+
+    @classmethod
+    def _replay_for_payload(
+        cls, record: JobRecord, payload: dict[str, object]
+    ) -> dict[str, object] | None:
+        return record.invocation_replay_results.get(
+            f"event:{cls._inbound_event_key(payload)}"
+        )
 
     @staticmethod
     def _control_payload(message: dict) -> dict[str, object] | None:
@@ -384,7 +632,7 @@ class DirectorEngine:
             "status": "ACK_RECEIVED",
             "job_id": record.job_id,
             "decision_id": record.decision_id,
-            **self._invocation_metadata(),
+            **self._invocation_metadata(record),
         }
         self._send(
             record,
@@ -420,7 +668,7 @@ class DirectorEngine:
             "invocation_result": InvocationResult.WAITING,
             "job_id": record.job_id,
             "decision_id": record.decision_id,
-            **self._invocation_metadata(),
+            **self._invocation_metadata(record),
             "delegate_mail_id": record.delegate_mail_id,
             "checkpoint": record.latest_checkpoint,
             "summary": "workerへ委任済み。Jobは非終端でworkerの応答を待つ。",
@@ -466,7 +714,7 @@ class DirectorEngine:
                 "task_eligible": True,
                 "job_id": record.job_id,
                 "decision_id": record.decision_id,
-                **self._invocation_metadata(),
+                **self._invocation_metadata(record),
                 "role": "claude_worker",
                 "task": "execute the requested work and report questions or completion",
                 "required": "send ACK and a terminal COMPLETED/FAILED/HUMAN_REQUIRED mail",
@@ -518,7 +766,7 @@ class DirectorEngine:
         record.latest_invocation_id = self.invocation_id
         record.parent_invocation_id = self.parent_invocation_id
         record.root_invocation_id = self.root_invocation_id
-        record.trigger_mail_uid = self.trigger_mail_uid or 0
+        record.trigger_mail_uid = self.trigger_mail_uid or record.trigger_mail_uid
         self.jobs.save(record)
         body = json.dumps({
             "message_type": "DECISION_REQUEST",
@@ -528,7 +776,7 @@ class DirectorEngine:
             "invocation_result": InvocationResult.DELEGATED,
             "job_id": record.job_id,
             "decision_id": record.decision_id,
-            **self._invocation_metadata(),
+            **self._invocation_metadata(record),
             "context_packet": packet, "question": question,
             "allowed_actions": ["ANSWER", "CONTINUE", "REVISE", "DELEGATE", "COMPLETE", "HUMAN_REQUIRED", "REJECT"],
             "answer_json": "{action, job_id, decision_id, confidence, reason, answer, target_agent, requires_human}",
@@ -589,7 +837,7 @@ class DirectorEngine:
                 "invocation_result": InvocationResult.FAILED,
                 "job_id": record.job_id,
                 "decision_id": record.decision_id,
-                **self._invocation_metadata(),
+                **self._invocation_metadata(record),
                 "reason": reason,
             },
             ensure_ascii=False,
@@ -615,7 +863,12 @@ class DirectorEngine:
             question_id = re.search(r"\b(Q[0-9]{3,})\b", message.get("subject", "") + " " + message.get("body", ""))
             answered = next((q for q in all_questions if question_id and q.number == question_id.group(1) and q.status == "ANSWERED"), None)
             if answered and answered.fields.get("Decision"):
-                return self._resume_with_answer(record, answered.fields["Decision"], answered.fields.get("Reason", "既存のANSWERED回答を再利用"))
+                return self._resume_with_answer(
+                    record,
+                    answered.fields["Decision"],
+                    answered.fields.get("Reason", "既存のANSWERED回答を再利用"),
+                    source_message=message,
+                )
             return self._human_required(record, "質問に対応するOPEN Blocking Q&Aがありません")
         question_record = questions[0]
         reused = find_answered_reuse(all_questions, question_record)
@@ -632,45 +885,75 @@ class DirectorEngine:
                 normalized_signature=normalized_reuse_signature(question_record),
                 reason="Category, target terms, proposed answer, and confirmed answer matched the fixed artifact protocol",
             )
-            return self._resume_with_answer(record, decision, reason)
+            return self._resume_with_answer(
+                record, decision, reason, source_message=message
+            )
         question = question_record.fields["Question"] if questions else message.get("body", "")[:2000]
         return self._request_decision(record, question)
 
-    def _resume_with_answer(self, record: JobRecord, answer: str, reason: str) -> JobRecord:
+    def _resume_with_answer(
+        self,
+        record: JobRecord,
+        answer: str,
+        reason: str,
+        *,
+        source_message: dict,
+    ) -> JobRecord:
+        origin_decision_id = record.decision_id
         new_decision_id = _new_decision_id(record.job_id, record.decision_count + 1)
-        record.decision_id = new_decision_id
-        record = record.transition(JobState.ANSWER_PENDING)
-        self.jobs.save(record)
-        packet, size, tokens = self._build_packet(record, f"Resume from checkpoint {record.latest_checkpoint}; use the formal Q&A answer: {answer}")
-        resumed_record = record.transition(JobState.WORKER_RESUMED)
-        body = json.dumps({
-            "message_type": "TASK",
-            "task_eligible": True,
-            "status": "DELEGATED",
-            "director_state": resumed_record.state,
+        replay_key = self._replay_key_for_message(source_message)
+        replay = {
             "invocation_result": InvocationResult.DELEGATED,
-            "job_id": record.job_id,
-            "decision_id": record.decision_id,
-            **self._invocation_metadata(),
+            "director_state": JobState.WORKER_RESUMED,
+            "decision_id": origin_decision_id,
+            "delegated_mail_uid": 0,
+            "next_decision_id": new_decision_id,
             "answer": answer,
-            "action": "ANSWER",
             "reason": reason,
-            "context_packet": packet,
-            "instruction": "Start a new CLI context. Do not repeat the answered question. Send ACK, then COMPLETED or WAITING_FOR_DECISION only if strictly necessary.",
-        }, ensure_ascii=False)
-        record.result_mail_uid = self._send(record, record.current_agent_uid, record.decision_id, f"[{record.job_id}] [{record.decision_id}] [{self.invocation_id}] ANSWER RESUME", body)
-        record.latest_invocation_id = self.invocation_id
-        record.latest_invocation_result = InvocationResult.DELEGATED
-        record.expected_worker_parent_invocation_id = self.invocation_id
-        record.expected_worker_trigger_mail_uid = record.result_mail_uid
-        record.active_worker_invocation_id = ""
-        self._log("resume_context_packet", job_id=record.job_id, decision_id=record.decision_id, path=packet, bytes=size, estimated_tokens=tokens)
+            "child_invocation_id": self.invocation_id,
+            "child_parent_invocation_id": self.parent_invocation_id,
+            "child_root_invocation_id": self.root_invocation_id,
+            "child_trigger_mail_uid": (
+                self.trigger_mail_uid or record.trigger_mail_uid
+            ),
+            **self._resume_replay_lineage(source_message),
+        }
+        record.invocation_replay_results[replay_key] = replay
+        # Persist the operation intent before sending the child. If the process
+        # stops after SMTP/DB commit but before the state save, the child outbox
+        # and this intent make the resume transaction recoverable.
+        self.jobs.save(record)
+        resumed_record = self._continue_resume_delegation(record, replay)
+        delegated_mail_uid = int(replay["delegated_mail_uid"])
+        result_payload = json.dumps(
+            {
+                "message_type": "INVOCATION_RESULT",
+                "task_eligible": False,
+                "status": "DELEGATED",
+                "director_state": resumed_record.state,
+                "invocation_result": InvocationResult.DELEGATED,
+                "job_id": record.job_id,
+                "decision_id": origin_decision_id,
+                **self._invocation_metadata(record),
+                "delegated_mail_uid": delegated_mail_uid,
+                "next_decision_id": new_decision_id,
+                "reason": "answer recorded and worker resume task issued",
+            },
+            ensure_ascii=False,
+        )
+        result_decision_id = (
+            f"{origin_decision_id}-RESULT-{int(source_message['mail_id'])}-{self.invocation_id}"
+        )
+        record.result_mail_uid = self._send(
+            record,
+            source_message["sender_uid"],
+            result_decision_id,
+            f"[{record.job_id}] [{origin_decision_id}] [{result_decision_id}] [{self.invocation_id}] STATUS: DELEGATED",
+            result_payload,
+        )
         resumed_record.result_mail_uid = record.result_mail_uid
-        resumed_record.latest_invocation_id = record.latest_invocation_id
-        resumed_record.latest_invocation_result = record.latest_invocation_result
-        resumed_record.expected_worker_parent_invocation_id = record.expected_worker_parent_invocation_id
-        resumed_record.expected_worker_trigger_mail_uid = record.expected_worker_trigger_mail_uid
-        resumed_record.active_worker_invocation_id = ""
+        resumed_record.latest_invocation_id = self.invocation_id
+        resumed_record.latest_invocation_result = InvocationResult.DELEGATED
         self.jobs.save(resumed_record)
         return resumed_record
 
@@ -694,7 +977,12 @@ class DirectorEngine:
                     answer_question(self.qanda_path, open_questions[0].number, decision=decision.answer, reason=decision.reason)
             except QandaError as err:
                 return self._human_required(record, f"QandA更新失敗: {err}")
-        return self._resume_with_answer(record, decision.answer, decision.reason)
+        return self._resume_with_answer(
+            record,
+            decision.answer,
+            decision.reason,
+            source_message=message,
+        )
 
     def _handle_completion(self, record: JobRecord, message: dict) -> JobRecord:
         body = message.get("body", "")
@@ -734,7 +1022,7 @@ class DirectorEngine:
                 "invocation_result": InvocationResult.COMPLETED,
                 "job_id": record.job_id,
                 "decision_id": record.decision_id,
-                **self._invocation_metadata(),
+                **self._invocation_metadata(record),
             }
         )
         record.result_mail_uid = self._send(
@@ -762,6 +1050,11 @@ class DirectorEngine:
             )
             if rejected_reason:
                 return self._fail_invocation(record, message, rejected_reason)
+            replay = record.invocation_replay_results.get(
+                self._replay_key_for_message(message)
+            )
+            if replay is not None:
+                return self._replay_invocation_result(record, message, replay)
             return self._complete_noop(record, message, "duplicate trigger already handled")
 
         # Validate correlation before changing any persistent lineage fields.
@@ -771,6 +1064,25 @@ class DirectorEngine:
         event_key = ""
         if internal_sender and payload is not None and payload.get("invocation_id"):
             event_key = self._inbound_event_key(payload)
+        replay = record.invocation_replay_results.get(
+            self._replay_key_for_message(message)
+        )
+        if replay is not None:
+            record = self._continue_resume_delegation(record, replay)
+            result = self._replay_invocation_result(record, message, replay)
+            if event_key:
+                current_mail_uid = int(message["mail_id"])
+                prior_mail_uid = result.inbound_result_mail_uids.get(event_key)
+                result.inbound_result_mail_uids[event_key] = (
+                    current_mail_uid
+                    if prior_mail_uid is None
+                    else min(prior_mail_uid, current_mail_uid)
+                )
+            if message["mail_id"] not in result.handled_mail_ids:
+                result.handled_mail_ids.append(message["mail_id"])
+            self.jobs.save(result)
+            return result
+        if internal_sender and payload is not None and payload.get("invocation_id"):
             canonical_mail_uid = record.inbound_result_mail_uids.get(event_key)
             if canonical_mail_uid is not None:
                 canonical_mail_uid = min(canonical_mail_uid, int(message["mail_id"]))
@@ -782,10 +1094,15 @@ class DirectorEngine:
                     canonical_mail_uid=canonical_mail_uid,
                     inbound_invocation_id=payload.get("invocation_id"),
                 )
-                result = self._complete_noop(
-                    record,
-                    message,
-                    "duplicate Invocation result ignored; canonical result retained",
+                replay = self._replay_for_payload(record, payload)
+                result = (
+                    self._replay_invocation_result(record, message, replay)
+                    if replay is not None
+                    else self._complete_noop(
+                        record,
+                        message,
+                        "duplicate Invocation result ignored; canonical result retained",
+                    )
                 )
                 if message["mail_id"] not in result.handled_mail_ids:
                     result.handled_mail_ids.append(message["mail_id"])
@@ -892,6 +1209,15 @@ class DirectorEngine:
         else:
             result = self._complete_noop(
                 record, message, "no additional Director action required"
+            )
+        if internal_sender and result.state == JobState.HUMAN_REQUIRED:
+            # Human visibility and invocation termination are separate duties.
+            # Keep the human escalation above, then explicitly terminate the
+            # Director launch back to the internal trigger sender.
+            result = self._fail_invocation(
+                result,
+                message,
+                "Director workflow requires human intervention",
             )
         if event_key:
             current_mail_uid = int(message["mail_id"])

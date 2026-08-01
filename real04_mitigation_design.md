@@ -57,6 +57,14 @@
 - Directorはworker/commanderへ発行した子タスクの親Invocationと実メールIDを
   永続化し、受信したparent/triggerをその発行済み関係と照合する。誤相関結果は
   Job状態を終端化せず、当該Director Invocationだけを失敗として隔離する。
+- commander回答後のworker再開TASKは新Decision-IDで発行し、起点Director
+  Invocationの`DELEGATED`結果は起点の旧Decision-IDで別送する。再開TASKを結果メールに
+  兼用しない。
+- 再開前にreplay intentを永続化し、旧/新Decision-ID、回答、送信元UID、起点結果の
+  invocation/parent/root/triggerを保持する。子TASK送信済み・状態未保存、および状態保存済み・
+  終端結果未送信の両境界で、Outboxから同一メールを回収して再実行可能にする。
+- 遅延・重複結果の認証には現在の子相関ではなく、保存済みの不変な起点系譜を使う。
+  replay結果メールの実UIDと最新InvocationResultも状態へ保存する。
 
 ## フェーズ3: 制御通知による誤起動防止
 

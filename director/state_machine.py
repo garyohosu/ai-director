@@ -66,7 +66,7 @@ ALLOWED_TRANSITIONS = {
     JobState.DECISION_PENDING: {JobState.DECISION_RECEIVED, JobState.HUMAN_REQUIRED},
     JobState.DECISION_RECEIVED: {JobState.ANSWER_PENDING, JobState.HUMAN_REQUIRED},
     JobState.ANSWER_PENDING: {JobState.WORKER_RESUMED, JobState.HUMAN_REQUIRED},
-    JobState.WORKER_RESUMED: {JobState.VERIFYING, JobState.WORKER_WAITING_QUESTION, JobState.FAILED},
+    JobState.WORKER_RESUMED: {JobState.VERIFYING, JobState.WORKER_WAITING_QUESTION, JobState.FAILED, JobState.HUMAN_REQUIRED},
     JobState.VERIFYING: {JobState.COMPLETED, JobState.FAILED, JobState.HUMAN_REQUIRED},
     JobState.OUTBOX_PENDING: {JobState.SENT, JobState.HUMAN_REQUIRED},
     JobState.SENT: {JobState.ANSWER_PENDING, JobState.WORKER_RESUMED, JobState.COMPLETED, JobState.HUMAN_REQUIRED},
@@ -120,6 +120,7 @@ class JobRecord:
     trigger_mail_uid: int = 0
     result_mail_uid: int = 0
     inbound_result_mail_uids: dict[str, int] = field(default_factory=dict)
+    invocation_replay_results: dict[str, dict[str, object]] = field(default_factory=dict)
     rejected_mail_reasons: dict[str, str] = field(default_factory=dict)
     delegate_mail_id: int = 0
     expected_worker_parent_invocation_id: str = ""
@@ -176,6 +177,56 @@ class JobRecord:
             raise StateError(
                 "inbound_result_mail_uids must map event keys to positive integers"
             )
+        if not isinstance(self.invocation_replay_results, dict):
+            raise StateError("invocation_replay_results must be an object")
+        valid_states = {
+            value
+            for key, value in vars(JobState).items()
+            if not key.startswith("_") and isinstance(value, str)
+        }
+        for event_key, replay in self.invocation_replay_results.items():
+            if not isinstance(event_key, str) or not event_key or not isinstance(replay, dict):
+                raise StateError("invocation_replay_results contains an invalid entry")
+            if replay.get("invocation_result") != InvocationResult.DELEGATED:
+                raise StateError("replay InvocationResult must be DELEGATED")
+            validate_decision_id(replay.get("decision_id"))
+            validate_decision_id(replay.get("next_decision_id"))
+            delegated_mail_uid = replay.get("delegated_mail_uid")
+            if (
+                isinstance(delegated_mail_uid, bool)
+                or not isinstance(delegated_mail_uid, int)
+                or delegated_mail_uid < 0
+            ):
+                raise StateError("replay delegated_mail_uid must be non-negative")
+            if replay.get("director_state") not in valid_states:
+                raise StateError("replay DirectorState is invalid")
+            for name in ("answer", "reason", "source_sender_uid"):
+                if not isinstance(replay.get(name), str) or not replay.get(name):
+                    raise StateError(f"replay {name} must be a non-empty string")
+            validate_invocation_id(replay.get("child_invocation_id"))
+            validate_invocation_id(replay.get("child_parent_invocation_id") or "")
+            validate_invocation_id(replay.get("child_root_invocation_id"))
+            child_trigger_mail_uid = replay.get("child_trigger_mail_uid")
+            if (
+                isinstance(child_trigger_mail_uid, bool)
+                or not isinstance(child_trigger_mail_uid, int)
+                or child_trigger_mail_uid <= 0
+            ):
+                raise StateError("replay child_trigger_mail_uid must be positive")
+            source_invocation_id = replay.get("source_invocation_id")
+            if source_invocation_id is not None:
+                validate_invocation_id(source_invocation_id)
+                validate_invocation_id(replay.get("source_parent_invocation_id"))
+                validate_invocation_id(replay.get("source_root_invocation_id"))
+                source_trigger_mail_uid = replay.get("source_trigger_mail_uid")
+                if (
+                    isinstance(source_trigger_mail_uid, bool)
+                    or not isinstance(source_trigger_mail_uid, int)
+                    or source_trigger_mail_uid <= 0
+                ):
+                    raise StateError(
+                        "replay source_trigger_mail_uid must be positive"
+                    )
         if not isinstance(self.rejected_mail_reasons, dict) or any(
             not isinstance(key, str)
             or not key.isdigit()
@@ -231,6 +282,7 @@ class JobStore:
         data.setdefault("trigger_mail_uid", 0)
         data.setdefault("result_mail_uid", 0)
         data.setdefault("inbound_result_mail_uids", {})
+        data.setdefault("invocation_replay_results", {})
         data.setdefault("rejected_mail_reasons", {})
         data.setdefault("expected_worker_parent_invocation_id", "")
         data.setdefault("expected_worker_trigger_mail_uid", 0)
@@ -253,6 +305,7 @@ class JobStore:
             data.setdefault("trigger_mail_uid", 0)
             data.setdefault("result_mail_uid", 0)
             data.setdefault("inbound_result_mail_uids", {})
+            data.setdefault("invocation_replay_results", {})
             data.setdefault("rejected_mail_reasons", {})
             data.setdefault("expected_worker_parent_invocation_id", "")
             data.setdefault("expected_worker_trigger_mail_uid", 0)

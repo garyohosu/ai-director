@@ -125,7 +125,7 @@
 ### コミットID
 
 - ai-orchestrator: `692fa7e` (`fix: prevent control notifications from launching agents`)
-- ai-director: この記録を含むフェーズ3コミットとして作成する。
+- ai-director: `1139fc3` (`fix: ignore structured control notifications`)
 
 ### 残課題
 
@@ -133,4 +133,46 @@
 
 ## フェーズ4: REAL04再実行
 
-- 未着手。
+### 試行1（REAL04-R1）
+
+- 実行開始: 2026-08-01 14:36 JST（`JOB-20260801T053600Z-REAL04-R1`）。
+- 使用AI: Director=`director`、作業AI=`claude_designer`（Claude Code）、
+  指揮AI=`codex_reviewer`（Codex CLI）。
+- 実フローは、起点mail 1、Director委任mail 3、Claude質問mail 6、Director判断依頼mail 7、
+  Codex回答mail 9、Director再開TASK mail 10、Claude完了mail 13、Director最終完了mail 14。
+- 成果物`director/tests/artifacts/real04_result.txt`は25 ASCII bytes、BOM/末尾改行なし、
+  SHA-256 `0A69635949D802CA985B6B8C89F3834AB973642529AB40C171065FC34C5D92B0`で内容要件を満たした。
+- `Q011`は新規質問としてANSWEREDになり、回答はUTF-8（BOMなし）だった。
+- ただしmail 9起点のDirector Invocationに対してmail 11の`SYSTEM_ALERT/NO_REPLY`が1件発生したため、
+  試行1は成功扱いにしない。全証跡は`director/records/_real04_runtime_20260801_R1`へ保存した。
+
+### 試行1の原因と修正
+
+- 再開処理がJobのDecision-IDを旧値から新値へ更新した後、worker向け再開TASK mail 10を
+  Director Invocationの終端結果にも兼用した。Orchestratorは起点mail 9の旧Decision-IDと
+  一致する結果を見つけられずNO_REPLYにした。
+- worker向け新Decision TASKと、起点旧Decisionの`DELEGATED`終端結果を別メールへ分離した。
+- 独立レビューで、子TASK送信後の状態保存失敗、終端結果送信失敗、後続相関へ切替後の遅延重複、
+  手動起動時のtrigger UID消失を動的再現した。再開intentを子送信前に保存し、Outbox回収と
+  不変の起点系譜によるreplayを実装した。人間通知へ遷移するworker失敗も、起動元へ別途
+  `InvocationResult=FAILED`を返すようにした。
+
+### 変更ファイル
+
+- `director/director.py`, `director/state_machine.py`,
+  `director/tests/test_minimal_loop.py`, `director/SPEC.md`,
+  `real04_mitigation_design.md`, 本記録。
+
+### テスト結果
+
+- Director全58件成功。
+- 終端結果送信失敗からの`process_once`再試行、子TASK送信後・状態保存前の中断回復、
+  commander/workerの遅延重複、誤系譜、手動trigger UID、worker FAILED終端を製品経路で確認した。
+
+### コミットID
+
+- ai-director: 試行1修正コミットとして作成する。
+
+### 残課題
+
+- 独立再レビュー完了後、クリーンな実行状態でREAL04-R2を実行する。
