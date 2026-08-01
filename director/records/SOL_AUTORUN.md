@@ -299,3 +299,147 @@
   非起動、未読維持、Jobの`DECISION_PENDING`、成果物なしが相互に整合すると確認した。
 - Phase 4停止記録コミット: ai-director `5e2d321`
   (`chore: record REAL04 usage limit stop`)。pushは実施していない。
+
+## Claude Code continuation
+
+- 引継ぎ開始時刻: 2026-08-01 17:35 JST（Codex Sol停止条件7からの継続）
+- 方針: R4証跡を保持し、クリーンな新Job/Decision/Invocationで再試験する。pushは行わない。
+
+### 各リポジトリのブランチとHEAD（引継ぎ時点）
+
+| リポジトリ | ブランチ | 開始時HEAD | git status |
+|---|---|---|---|
+| ai-director | `agent/director-waiting-protocol` | `2650d0d` | clean（未追跡なし） |
+| ai-orchestrator | `agent/spec-proofread-qanda` | `692fa7e` | clean |
+| aiagent-mail | `main` | `13c7e99` | clean |
+
+### 確認したSolコミット
+
+指定された12件すべてが存在し、各HEADから到達可能であることを`git merge-base --is-ancestor`で確認した。
+
+- ai-director: `db4d769`, `c3a51a9`, `1139fc3`, `bd9db8e`, `9f058be`, `6ad0b39`, `5e2d321`, `2650d0d`
+- ai-orchestrator: `437d139`, `077209a`, `692fa7e`
+- aiagent-mail: `13c7e99`
+
+3リポジトリとも`git diff --check`、`git diff --cached --check`は成功。未コミット変更・ローカルコミットの破棄は行っていない。
+
+### 調査結果
+
+- 基準テストはSol報告値と完全一致した（director 60、orchestrator 165、mail 61、合計286）。
+  orchestratorは`PYTHONPATH=orchestrator`が必要で、未設定だと9件がimportエラーになる。
+  これは実行構成の問題でありコードの退行ではない。
+- ai-director配下の`orchestrator/`と`mail/`はvendored copyで`.git/info/exclude`により非追跡。
+  正式リポジトリと`diff -r`でバイト一致を確認したため、正式リポジトリのテストは
+  REAL04が実際に実行するコードをそのまま検証している。
+- R4のmail 9は`message_type=SYSTEM_ALERT`かつ`task_eligible=false`であり、
+  `IGNORED_CONTROL_NOTIFICATION`として1回だけ記録され、未読のまま、AIを起動していない。
+  R4のorchestrator.jsonlでも起動は director/claude/director/codex/director の5回のみで、
+  通知メールによる誤起動は発生していない。Solの報告を証跡とコードの両方で確認した。
+- Codex CLIは利用可能に復帰していた。最小プローブ（`codex exec`で1プロンプト、
+  4,790トークン）が正常応答したため、代替ワーカーではなく本来のCodexでR5を実施した。
+
+### レビュー結果と修正（P1を1件発見）
+
+`director/agent_reply.py`の`mask_secrets`が**直列化後のJSON文字列**に対して行単位の
+マスクを行っていた。本文が token/secret/password/authorization/cookie/api_key を
+含むと`"key": "value"`行全体が`[REDACTED_SECRET_LINE]`へ置換され、本文が
+**JSONとして壊れる**。orchestratorは解析不能な本文を「構造化payloadなし」とみなすため
+`_invocation_matches`が不成立となり、正しい返信が**NO_REPLYと誤判定**される。
+これはREAL04が解消しようとしている失敗そのものであり、再現実験で確認した。
+
+修正: 直列化前に値側でマスクする方式へ変更した。
+- 秘密語を含むキーは値を`[REDACTED_SECRET_VALUE]`に置換
+- 文字列値の内部は行単位でマスク（JSON文字列として妥当なまま）
+- 相関フィールド（invocation/parent/root/trigger/job/decision、artifactの path・sha256）は
+  `_PROTECTED_KEYS`として一切マスクしない
+
+秘匿性は弱めていない（キー名による値の秘匿を追加したため、むしろ強化されている）。
+
+### 追加テスト
+
+`director/tests/test_agent_reply.py`に2件追加。
+- `test_masked_body_stays_valid_json_when_text_mentions_secrets`
+- `test_masked_body_redacts_secret_keys_and_nested_values`
+
+### 全テスト結果（修正後）
+
+- ai-director: 62件成功（60 + 追加2）
+- ai-orchestrator: 165件成功
+- aiagent-mail: 61件成功
+- 合計288件成功。3リポジトリの`compileall`、`git diff --check`、`git diff --cached --check`成功。
+- テストのskip・削除・期待値の弱体化は行っていない。
+
+### REAL04-R5（試行5、Claude Code側の新規試行1回目）
+
+- 実行: 2026-08-01 17:54–18:08 JST
+- Job-ID: `JOB-20260801T085449Z-REAL04-R5`
+- Decision-ID（初期）: `DEC-20260801T085449Z-01-R405`
+- Decision-ID（再開の子）: `DEC-20260801T090555Z-02-BBA2`
+- 使用AI: Director=`director`、作業AI=`claude_designer`（Claude Code）、
+  指揮AI=`codex_reviewer`（Codex CLI、実AI）
+- 事前準備: R4のライブDBは`director/records/_pre_real05_archive_20260801T084917Z/`へ
+  moveで退避（削除ではない。R4証跡内のコピーとmd5一致を確認済み）。空DBから
+  R4と同じ順序でユーザー登録し、UIDの一致を確認した。
+
+#### Invocation系譜（すべて root = `INV-20260801T085902355Z-001-B53CD244-...`）
+
+| 役割 | Invocation-ID | parent | trigger mail |
+|---|---|---|---|
+| root/Director | `INV-20260801T085902355Z-001-B53CD244` | null | 1 |
+| Claude（初回） | `INV-20260801T085902691Z-001-D99E73E8` | root | 3 |
+| question Director | `INV-20260801T090209650Z-001-7CB1E1A1` | Claude初回 | 6 |
+| Codex | `INV-20260801T090210155Z-001-3FC309FC` | question Director | 8 |
+| 起点結果Director | `INV-20260801T090552591Z-001-400130xx` | Claude初回 | 7 |
+| 再開Director | `INV-20260801T090554922Z-001-49F376B0` | Codex | 10 |
+| Claude（再開） | `INV-20260801T090555395Z-001-E6BE7F62` | 再開Director | 12 |
+| 最終Director | `INV-20260801T090745751Z-001-49F2B5F0` | Claude再開 | 15 |
+
+#### 関連メールUID（全16通）
+
+1 起点依頼、2 Director ACK、3 Claude宛TASK、4 WAITING_FOR_WORKER、
+5 Claude ACK、6 QUESTION Q015、7 Claude WAITING（製品reporter）、
+8 Codex宛DECISION_REQUEST、9 Codex ACK、10 Codex回答（COMPLETED/ANSWER/confidence=HIGH）、
+11 旧DecisionのClaude宛終端結果、12 新DecisionのClaude再開TASK、
+13 Codex宛終端結果（DELEGATED）、14 Claude ACK、15 Claude COMPLETED、
+16 Director最終COMPLETED（human_controller宛）。
+
+#### 成果物
+
+- `director/tests/artifacts/real04_result.txt`
+- 25 ASCII bytes、BOMなし、末尾改行なし、内容`REAL04_AUTONOMOUS_LOOP_OK`
+- SHA-256 `0A69635949D802CA985B6B8C89F3834AB973642529AB40C171065FC34C5D92B0`
+- Directorが独立にファイル存在とSHA-256を再計算して検証した。
+
+#### 判定: 成功
+
+- orchestrator結果内訳: `SUCCESS` 8件、`IGNORED_CONTROL_NOTIFICATION` 5件。
+  **NO_REPLYは0件、SYSTEM_ALERTは0件、FAILEDは0件。**
+- 起動は8回で、いずれも起動対象メール1通につき1回のみ（重複起動なし）。
+- 制御通知（mail 5, 9, 11, 13, 14 = `task_eligible=false`）はそれぞれ1回だけ
+  処理され、AIを起動していない。
+- Q015は本Job用に新規作成され`ANSWERED`。Q014はOPENのまま変更していない。
+- Job状態は`COMPLETED`、`result_mail_uid=16`。
+- 全Invocationのparent/root/trigger_mail_uidが相互に整合する。
+- 停止は`stop.request`による安全停止で、orchestratorは終了コード0で正常終了した。
+
+#### 証跡保存場所
+
+- `director/records/_real04_runtime_20260801_R5`（48ファイル）
+- R4証跡`_real04_runtime_20260801_R4`は変更・上書きしていない（41ファイル、DBのmd5一致で確認）。
+
+### コミットID
+
+- ai-director: `44556d3` (`fix: keep masked result bodies valid JSON`)
+- ai-orchestrator: 変更なし
+- aiagent-mail: 変更なし
+
+### 残課題・既知の制限
+
+- R5ではどの段階も失敗しなかったため、SYSTEM_ALERT自体が生成されていない。
+  「SYSTEM_ALERTがAIを起動しない」ことの実証はR4のmail 9の証跡と単体テストによる。
+  R5が直接示したのは`task_eligible=false`の制御通知5件が一度ずつ処理され
+  AIを起動しないことである。
+- 構造化reply protocolの遵守は依然としてLLMへの指示であり、orchestrator側の
+  信頼済みbrokerによる強制ではない（Solの記載と同じ制限）。
+- Q014はR4の失敗証跡としてOPENのまま残している。人間が閉じるか否かを判断すること。
+- pushは実施していない。

@@ -204,3 +204,20 @@
 - Question: 本R4受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)で確定してよいか、(b)末尾改行を付けないことで確定してよいか、(c)結果として全体バイト長を厳密に25バイトとしてよいか、の3点の確定回答をdirectorへ求めます。
 - Proposed-Answer: (a)UTF-8(BOMなし)、(b)末尾改行なし、(c)全体25バイト、を推奨する。BOMを付けると先頭に3バイト、末尾改行を付けるとCRLF/LFで1〜2バイトが追加され、いずれも合計バイト長と検証対象のSHA-256が別値になるため。
 - Evidence: 本Job(JOB-20260801T071255Z-REAL04-R4)のDELEGATEメール(mail_id=3)の依頼書。依頼書本文にはUTF-8(BOMなし)・末尾改行なし・25バイトの記載があるが、成果物作成前に本Job固有のBlocking判断として確定を求める。Q006・Q010・Q011・Q012・Q013はいずれも別Request-IDのため再利用せず、それらの回答を本件の充足とみなさず、本Job用にQ014を新規採番した。
+
+## Q015
+- Status: ANSWERED
+- Request-ID: JOB-20260801T085449Z-REAL04-R5
+- Decision-ID: DEC-20260801T085449Z-01-R405
+- From: claude_designer
+- To: director
+- Severity: HIGH
+- Blocking: YES
+- Category: SPEC
+- Question: 本R5受入試験の成果物 director/tests/artifacts/real04_result.txt について、(a)文字コードをUTF-8(BOMなし)で確定してよいか、(b)末尾改行を付けないことで確定してよいか、(c)結果として全体バイト長を厳密に25バイト(ASCII文字列 REAL04_AUTONOMOUS_LOOP_OK)としてよいか、の3点の確定回答をdirectorへ求めます。
+- Proposed-Answer: (a)UTF-8(BOMなし)、(b)末尾改行なし、(c)全体25バイト、を推奨する。BOMを付けると先頭に3バイト、末尾改行を付けるとCRLF/LFで1〜2バイトが追加され、いずれも合計バイト長と検証対象のSHA-256が別値になるため。
+- Evidence: 本Job(JOB-20260801T085449Z-REAL04-R5)のDELEGATEメール(mail_id=3)の依頼書。依頼書本文にはUTF-8(BOMなし)・末尾改行なし・25バイトの記載があるが、成果物作成前に本Job固有のBlocking判断として確定を求める。Q006・Q010・Q011・Q012・Q013・Q014はいずれも別Request-IDのため再利用せず、それらの回答を本件の充足とみなさず、本Job用にQ015を新規採番した。
+- Answered-By: director
+- Decision: Confirmed: create director/tests/artifacts/real04_result.txt as UTF-8 without BOM, with no trailing newline, containing exactly the 25 ASCII bytes REAL04_AUTONOMOUS_LOOP_OK.
+- Reason: The requested acceptance artifact is an ASCII string of exactly 25 bytes. UTF-8 without BOM preserves those 25 bytes, while a BOM or trailing newline would add bytes and violate the exact-length requirement.
+- Answered-At: 2026-08-01T09:05:55Z
