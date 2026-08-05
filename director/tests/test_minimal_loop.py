@@ -271,6 +271,39 @@ class DirectorUnitTests(unittest.TestCase):
             self.assertEqual(resumed.state, JobState.ANSWER_PENDING)
             self.assertEqual(record.transition(JobState.ACK_SENT).transition(JobState.DELEGATION_PENDING).transition(JobState.WAITING_FOR_WORKER).state, JobState.WAITING_FOR_WORKER)
 
+    def test_discovered_request_without_decision_id_bootstraps_new_decision_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+            human = engine.uids["human"]
+            mail.send_mail(human, engine.uid, "[JOB-BOOT-001] request without decision id", "safe task")
+            self.assertEqual(engine.process_once(), 1)
+            record = engine.jobs.load("JOB-BOOT-001")
+            self.assertIsNotNone(record)
+            self.assertEqual(record.state, JobState.WAITING_FOR_WORKER)
+            self.assertRegex(record.decision_id, r"^DEC-[A-Za-z0-9._-]+$")
+            outbound = [m for m in mail.messages if m["sender_uid"] == engine.uid]
+            self.assertIn(record.decision_id, outbound[1]["subject"])
+
+    def test_unrecoverable_message_is_logged_and_skipped_not_crashed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "director").mkdir()
+            mail = FakeMail()
+            engine = DirectorEngine(root, mail=mail, config_path=root / "missing.json")
+            human = engine.uids["human"]
+            mail.send_mail(human, engine.uid, "no job id bracket at all", "safe task")
+            self.assertEqual(engine.process_once(), 1)
+            events = [
+                json.loads(line)
+                for line in engine.log_path.read_text(encoding="utf-8").splitlines()
+            ]
+            unrecoverable = [e for e in events if e.get("event") == "unrecoverable_message"]
+            self.assertEqual(len(unrecoverable), 1)
+            self.assertIn("Job-ID missing from subject", unrecoverable[0]["original_error"])
+
     def test_invocation_id_is_persisted_and_restored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))

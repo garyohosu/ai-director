@@ -686,7 +686,12 @@ class DirectorEngine:
         existing = self.jobs.load(job_id)
         if existing:
             return existing
-        decision_id = _id(DEC_RE, message["subject"], "Decision-ID")
+        # Decision-ID is minted by Director for the first outbound mail.
+        # A fresh human request may contain only a Job-ID, so do not reject
+        # it before the initial record can be created. Reuse an explicitly
+        # supplied Decision-ID for replay/resend messages.
+        dec_match = DEC_RE.search(message["subject"])
+        decision_id = dec_match.group(1) if dec_match else _new_decision_id(job_id, 1)
         record = JobRecord(
             job_id,
             message["mail_id"],
@@ -1351,10 +1356,33 @@ class DirectorEngine:
             try:
                 self._process(message)
             except DirectorError as err:
-                record = self._create_record(message)
+                try:
+                    record = self._create_record(message)
+                except DirectorError as record_err:
+                    # The recovery path cannot create a record when the
+                    # message itself lacks a valid Job-ID. Log and skip the
+                    # poison message instead of crashing on the same error.
+                    self._log(
+                        "unrecoverable_message",
+                        mail_id=message.get("mail_id"),
+                        subject=message.get("subject"),
+                        original_error=str(err),
+                        record_error=str(record_err),
+                    )
+                    continue
                 self._fail_invocation(record, message, f"相関検証失敗: {err}")
             except (StateError, ValueError) as err:
-                record = self._create_record(message)
+                try:
+                    record = self._create_record(message)
+                except DirectorError as record_err:
+                    self._log(
+                        "unrecoverable_message",
+                        mail_id=message.get("mail_id"),
+                        subject=message.get("subject"),
+                        original_error=str(err),
+                        record_error=str(record_err),
+                    )
+                    continue
                 self._human_required(record, f"安全停止: {err}")
         return min(len(messages), limit)
 
